@@ -242,6 +242,19 @@ jobs:
             throw "VirtualBox configure failed with exit code $LASTEXITCODE.";
           }
 
+          # --- SVN revision ---
+          # Day la ban git (khong phai SVN) nen '$Rev: ... $' trong Version.kmk
+          # khong duoc expand. Config.kmk:9585 thu doc revision tu commit message
+          # (dong "svn:sync-xref-src-repo-rev: rNNNNN") -> commit message cua
+          # chung ta khong co dong do -> VBOX_SVN_REV rong ->
+          # IPRT_BLDCFG_SCM_REV rong -> buildconfig.cpp: "function must return
+          # a value" (error C2561).
+          # Config.kmk:9613-9622 cho phep override VBOX_SVN_REV tu ben ngoai.
+          $svnRev = "0";
+          $m = Select-String -Path "Version.kmk" -Pattern '\$Id: Version\.kmk (\d+)' | Select-Object -First 1;
+          if ($m) { $svnRev = $m.Matches[0].Groups[1].Value };
+          Write-Host "Using VBOX_SVN_REV = $svnRev";
+
           # Ép bật Qt6 GUI trực tiếp vào LocalConfig.kmk (phòng trường hợp configure.vbs bỏ sót Qt6)
           $localCfg = @(
             "VBOX_WITH_QTGUI = 1",
@@ -255,7 +268,8 @@ jobs:
             "VBOX_WITH_ADDITIONS_PACKING = ",
             "VBOX_WITH_WARNINGS_AS_ERRORS = ",
             "VBOX_WITH_TESTCASES = ",
-            "VBOX_WITH_VALIDATIONKIT = "
+            "VBOX_WITH_VALIDATIONKIT = ",
+            "VBOX_SVN_REV = $svnRev"
           );
           Set-Content -Path "LocalConfig.kmk" -Value $localCfg -Encoding utf8;
 
@@ -587,6 +601,12 @@ jobs:
             throw "VirtualBox configure failed with exit code $LASTEXITCODE.";
           }
 
+          # --- SVN revision (xem ghi chu trong job "build") ---
+          $svnRev = "0";
+          $m = Select-String -Path "Version.kmk" -Pattern '\$Id: Version\.kmk (\d+)' | Select-Object -First 1;
+          if ($m) { $svnRev = $m.Matches[0].Groups[1].Value };
+          Write-Host "Using VBOX_SVN_REV = $svnRev";
+
           # LocalConfig.kmk: build Guest Additions, va thay bo DDK 7.1 bang WDK 10.
           $localCfg = @(
             "VBOX_WITH_QTGUI = 1",
@@ -599,6 +619,7 @@ jobs:
             "VBOX_WITH_WARNINGS_AS_ERRORS = ",
             "VBOX_WITH_TESTCASES = ",
             "VBOX_WITH_VALIDATIONKIT = ",
+            "VBOX_SVN_REV = $svnRev",
             "# --- Guest Additions ---",
             "VBOX_WITHOUT_ADDITIONS = ",
             "VBOX_WITH_ADDITIONS_PACKING = 1",

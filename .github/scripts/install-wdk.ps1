@@ -144,19 +144,110 @@ if (-not $SkipSdk) {
 
 # ---------------------------------------------------------------------------
 # 2. Windows Driver Kit
+#
+# WDK 19041 co 26 package, trong do 3 package dinh nghia bo lib "downlevel"
+# (Windows 7 / 8 / 8.1) -- nhung feature "WindowsDriverKitComplete" KHONG chon
+# cac package do (log cua installer: "ba requested: None, execute: None").
+#
+#   package_Windows7WDKHeadersandLibs_x86_en_us    -> Lib\win7\km\*
+#   package_Windows8WDKHeadersandLibs_x86_en_us    -> Lib\win8\km\*
+#   package_Windows8.1WDKHeadersandLibs_x86_en_us  -> Lib\winv6.3\km\*
+#
+# Feature id cua chung khong doan duoc (bootstrapper chi bao loi "not available"
+# cho id sai, khong liet ke id hop le).  => Dung layout + msiexec truc tiep:
+#   1. tai layout (chua toan bo MSI)
+#   2. cai layout.exe (bo mac dinh)
+#   3. cai rieng 3 MSI downlevel bang msiexec
 # ---------------------------------------------------------------------------
 $wdkOk = $true
 if (-not $SkipWdk) {
-    $wdkOk = Install-Kit -Url $WdkUrl -ExeName 'wdksetup.exe' `
-        -DirectArgs @('/features', 'OptionId.WindowsDriverKitComplete', '/q', '/ceip', 'off', '/norestart') `
-        -LayoutFeature '' `
-        -Verify { Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib") }
+    $wdkExe = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
+    Write-Step "Downloading WDK bootstrapper ($WdkUrl)"
+    Invoke-WebRequest -Uri $WdkUrl -OutFile $wdkExe -UseBasicParsing
+
+    $layoutDir = Join-Path $env:RUNNER_TEMP 'wdk-layout'
+    $null = New-Item -ItemType Directory -Force -Path $layoutDir
+
+    Write-Step "Downloading WDK layout to $layoutDir (~2 GB, goi 1 lan)"
+    $proc = Start-Process -FilePath $wdkExe `
+        -ArgumentList @('/layout', $layoutDir, '/quiet', '/ceip', 'off') `
+        -Wait -PassThru -NoNewWindow
+    Write-Host "    wdksetup.exe /layout -> exit $($proc.ExitCode)"
+    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+        throw "WDK layout download failed with exit code $($proc.ExitCode)"
+    }
+
+    $layoutExe = Get-ChildItem -Path $layoutDir -Filter 'layout.exe' -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $layoutExe) {
+        throw "layout.exe not found under $layoutDir - WDK layout is incomplete."
+    }
+
+    Write-Step "Installing WDK default feature set"
+    $proc = Start-Process -FilePath $layoutExe.FullName `
+        -ArgumentList @('/quiet', '/norestart', '/ceip', 'off') `
+        -Wait -PassThru -NoNewWindow
+    Write-Host "    layout.exe -> exit $($proc.ExitCode)"
+
+    # Cai rieng 3 bo lib downlevel (Win7 / Win8 / 8.1) neu chua co.
+    $downlevel = @(
+        @{ Pattern = '*Windows7WDKHeadersandLibs*.msi';   Marker = 'Lib\win7\km\x64' },
+        @{ Pattern = '*Windows8WDKHeadersandLibs*.msi';   Marker = 'Lib\win8\km\x64' },
+        @{ Pattern = '*Windows8.1WDKHeadersandLibs*.msi'; Marker = 'Lib\winv6.3\km\x64' }
+    )
+
+    foreach ($dl in $downlevel) {
+        $markerPath = Join-Path $KitsRoot $dl.Marker
+        if (Test-Path -LiteralPath $markerPath) {
+            Write-Step "$($dl.Marker) already present - skip"
+            continue
+        }
+
+        $msi = Get-ChildItem -Path $layoutDir -Filter $dl.Pattern -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $msi) {
+            Write-Host "    MSI for $($dl.Marker) not found in layout" -ForegroundColor Yellow
+            continue
+        }
+
+        Write-Step "Installing downlevel lib pack: $($msi.Name)"
+        $proc = Start-Process -FilePath 'msiexec.exe' `
+            -ArgumentList @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart') `
+            -Wait -PassThru -NoNewWindow
+        Write-Host "    msiexec -> exit $($proc.ExitCode)"
+        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+            Write-Host "    msiexec failed for $($msi.Name)" -ForegroundColor Yellow
+        }
+    }
+
+    $wdkOk = Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib")
 }
 
 # ---------------------------------------------------------------------------
 # 3. Kiểm tra các thư mục mà VirtualBox cần
 # ---------------------------------------------------------------------------
 Write-Step "Verifying required kit directories under $KitsRoot"
+
+# Ghi cay cay kit da cai dat -> artifact de debug khi co thay doi.
+$treeFile = 'wdk-kit-tree.txt'
+Write-Step "Dumping kit tree to $treeFile"
+@(
+    "=== Lib ==="
+    (Get-ChildItem -Path (Join-Path $KitsRoot 'Lib') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
+    "=== Include ==="
+    (Get-ChildItem -Path (Join-Path $KitsRoot 'Include') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { $_.Name })
+    "=== Lib\*\km ==="
+    (Get-ChildItem -Path (Join-Path $KitsRoot 'Lib') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $km = Join-Path $_.FullName 'km'
+            if (Test-Path $km) {
+                $archs = (Get-ChildItem -Path $km -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ','
+                "$($_.Name)\km -> $archs"
+            }
+        })
+) | Set-Content -Path $treeFile -Encoding utf8
 
 $required = @(
     @{ Path = "Include\$KitVersion\km";            Desc = 'KM headers' },
@@ -165,6 +256,10 @@ $required = @(
     @{ Path = "Lib\$KitVersion\km\x86";            Desc = 'KM libs (x86)    -> WINSDK10-KM' },
     @{ Path = 'Lib\win7\km\x64';                   Desc = 'Win7 KM libs      -> WINSDK10-KM-W7 / -WLH' },
     @{ Path = 'Lib\win8\km\x64';                   Desc = 'Win8 KM libs      -> WINSDK10-KM-W8' }
+)
+
+$optional = @(
+    @{ Path = 'Lib\winv6.3\km\x64';                Desc = 'Win8.1 KM libs    -> WINSDK10-KM-W81' }
 )
 
 $missing = [System.Collections.Generic.List[string]]::new()
@@ -176,6 +271,16 @@ foreach ($r in $required) {
     else {
         Write-Host ("  MISS {0,-40} {1}" -f $r.Path, $r.Desc) -ForegroundColor Red
         $missing.Add("$($r.Path) ($($r.Desc))")
+    }
+}
+
+foreach ($r in $optional) {
+    $full = Join-Path $KitsRoot $r.Path
+    if (Test-Path -LiteralPath $full) {
+        Write-Host ("  OK   {0,-40} {1}  (optional)" -f $r.Path, $r.Desc)
+    }
+    else {
+        Write-Host ("  --   {0,-40} {1}  (optional, not installed)" -f $r.Path, $r.Desc) -ForegroundColor DarkGray
     }
 }
 

@@ -921,6 +921,95 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | CI-11 | `VBOX_WITHOUT_ADDITIONS=1` chặn PR-2 | 0.4.2 |
 | CI-12 | `LocalConfig.kmk` bị ghi đè mỗi run | OK — file nằm trong `.gitignore`, sinh lại mỗi job |
 
+#### 4.7.9 Lỗi CI lần 1 (run `39571032952`) và cách sửa
+
+> Run đầu tiên sau khi sửa checkout: `https://github.com/vuong4-design/virtualbox/actions/runs/39571032952`
+> → `build` **fail**, `full-additions` **fail**, `smoke` skipped.
+
+##### Lỗi A — `build` job: `error C2561: 'RTBldCfgRevision': function must return a value`
+
+```
+src\VBox\Runtime\common\misc\buildconfig.cpp(49,5): error C2561: 'RTBldCfgRevision': function must return a value
+src\VBox\Runtime\common\misc\buildconfig.cpp(55,5): error C2561: 'RTBldCfgRevisionStr': function must return a value
+```
+
+**Nguyên nhân:** đây là bản **git**, không phải SVN. `Version.kmk:48` có
+`VBOX_SVN_REV_VERSION_FALLBACK := $(patsubset %:,,  $Rev: 115387 $  )` — chỗ `$Rev: … $` chỉ được
+expand trong SVN. `Config.kmk:9568-9607` xử lý git bằng cách đọc **commit message** HEAD tìm dòng
+`svn:sync-xref-src-repo-rev: rNNNNN`:
+
+```make
+$(GIT) log -1 $(PATH_ROOT) | $(SED) … -e '/svn:sync-xref-src-repo-rev\: r/!d' …
+```
+
+Commit message của chúng ta không có dòng đó → `VBOX_SVN_REV` rỗng →
+`IPRT_BLDCFG_SCM_REV` rỗng → `buildconfig.cpp` sinh ra `return ;` → **C2561**.
+
+**Cách sửa (đã áp dụng):** `Config.kmk:9613-9622` hỗ trợ override từ bên ngoài
+(*"allow to overwrite VBOX_SVN_REV externally"*). Workflow đọc revision từ `Version.kmk` rồi ghi vào
+`LocalConfig.kmk`:
+
+```powershell
+$svnRev = (Select-String -Path "Version.kmk" -Pattern '\$Id: Version\.kmk (\d+)').Matches[0].Groups[1].Value
+# -> "VBOX_SVN_REV = 115387"
+```
+
+> **Ghi chú:** cách "đúng" của upstream là thêm dòng `svn:sync-xref-src-repo-rev: r115387` vào commit
+> message. Cách trên tự động và không phụ thuộc cách commit — nên dùng cách trên.
+
+##### Lỗi B — `full-additions` job: thiếu `Lib\win7\km\x64` và `Lib\win8\km\x64`
+
+Log cho thấy SDK + WDK 19041 **đã cài thành công**:
+
+```
+==> winsdksetup.exe /features OptionId.WindowsDesktopSDK-10.0.19041.0 … -> exit 1001
+==> winsdksetup.exe installed.                       <- verify pass
+==> wdksetup.exe /features OptionId.WindowsDriverKitComplete … -> exit 0
+==> wdksetup.exe installed.                          <- verify pass
+  OK   Include\10.0.19041.0\km          OK   Lib\10.0.19041.0\km\x64
+  OK   Include\10.0.19041.0\um          OK   Lib\10.0.19041.0\km\x86
+  MISS Lib\win7\km\x64                  MISS Lib\win8\km\x64
+```
+
+**Nguyên nhân (đã xác minh bằng log WiX Burn của chính installer):** WDK 19041 có **26 package**, trong đó
+3 package cung cấp bộ lib "downlevel" — nhưng feature `OptionId.WindowsDriverKitComplete`
+**không chọn** chúng:
+
+```
+i201: Planned package: package_Windows7WDKHeadersandLibs_x86_en_us,   … ba requested: None, execute: None
+i201: Planned package: package_Windows8WDKHeadersandLibs_x86_en_us,   … ba requested: None, execute: None
+i201: Planned package: package_Windows8.1WDKHeadersandLibs_x86_en_us, … ba requested: None, execute: None
+```
+
+Feature id của 3 package đó **không đoán được**: bootstrapper chỉ báo
+`ERROR: The following features specified by the /features switch are not available: …` cho id sai,
+**không** liệt kê id hợp lệ (đã thử 8 biến thể → tất cả invalid).
+
+**Cách sửa (đã áp dụng):** bỏ qua feature id, dùng **layout + msiexec trực tiếp**:
+
+1. `wdksetup.exe /layout <dir> /quiet` → tải toàn bộ MSI (khoảng 2 GB).
+2. `layout.exe /quiet` → cài bộ mặc định.
+3. `msiexec /i "<layout>\*Windows7WDKHeadersandLibs*.msi" /qn` (tương tự cho Win8 / Win8.1) →
+   cài `Lib\win7\km\*`, `Lib\win8\km\*`, `Lib\winv6.3\km\*`.
+
+Ngoài ra script giờ **dump cây kit đã cài** vào `wdk-kit-tree.txt` (uploaded artifact) để lần CI sau
+có ground truth ngay cả khi vẫn còn thiếu.
+
+> **Ghi chú:** WDK 19041 **có** các bộ lib này (đã xác minh qua listing hệ thống thật:
+> `Windows Kits/10/Lib/win7/km/{x64,x86}/ntoskrnl.lib`, `…/win8/km/{x64,x86,arm}/…`,
+> `…/winv6.3/km/…`) — chỉ là installer mặc định không chọn.
+
+##### Sai lầm của tôi lúc thiết kế (đã ghi nhận)
+
+Tôi đã khẳng định trong §4.7.5 rằng *"WDK 10.0.19041 là bản duy nhất còn cả lib x86 lẫn win7/win8"* và
+*"script đã thử layout fallback"*. Thực tế:
+- Bản 19041 **có** win7/win8 (đúng), nhưng installer không cài mặc định (sai ở chỗ tôi cho là đã xử lý).
+- Layout fallback của script cũ **không** cài các package downlevel vì nó chạy `layout.exe` với bộ
+  feature mặc định — tức cũng bỏ sót đúng cái cần cài.
+
+Đã sửa lại bằng cách cài MSI trực tiếp như trên.
+
+
 
 ---
 
