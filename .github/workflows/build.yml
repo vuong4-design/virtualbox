@@ -675,6 +675,29 @@ jobs:
           Write-Host "=== LocalConfig.kmk Content ===";
           Get-Content "LocalConfig.kmk";
 
+      - name: Install Mesa Python build dependencies
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          # Mesa generates sources with Python (mako).  Use the exact
+          # interpreter configure selected, not whatever "python" resolves to.
+          $m = Select-String -Path "AutoConfig.kmk" -Pattern '^VBOX_BLD_PYTHON\s*:=\s*(.+)$' | Select-Object -First 1;
+          if (-not $m) { throw "VBOX_BLD_PYTHON not found in AutoConfig.kmk"; }
+          $py = $m.Matches[0].Groups[1].Value.Trim();
+          Write-Host "Build Python: $py";
+
+          & $py -m pip install --disable-pip-version-check --no-input mako;
+          if ($LASTEXITCODE -ne 0) {
+            throw "pip install mako failed with exit code $LASTEXITCODE";
+          }
+
+          & $py -c "import mako; print('Mako ' + mako.__version__)";
+          if ($LASTEXITCODE -ne 0) {
+            throw "Mako import failed with exit code $LASTEXITCODE";
+          }
+
       - name: Build VirtualBox with Guest Additions
         shell: pwsh
         working-directory: ${{ github.workspace }}
