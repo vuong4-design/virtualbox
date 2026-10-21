@@ -37,6 +37,7 @@ param(
     [string] $SdkUrl     = 'https://go.microsoft.com/fwlink/?linkid=2311805',
     [string] $WdkUrl     = 'https://go.microsoft.com/fwlink/?linkid=2342425',
     [string] $KitsRoot  = "${env:ProgramFiles(x86)}\Windows Kits\10",
+    [string] $LayoutDir = '',
     [switch] $SkipSdk,
     [switch] $SkipWdk
 )
@@ -160,61 +161,109 @@ if (-not $SkipSdk) {
 # ---------------------------------------------------------------------------
 # 2. Windows Driver Kit
 #
-# Feature id that can trich truc tiep tu Burn manifest cua wdksetup.exe
-# (MsiProperty KITSOPTION cua tung package):
-#   package_Windows7WDKHeadersandLibs_x86_en_us    -> OptionId.WdkDownlevelContent
-#   package_Windows8WDKHeadersandLibs_x86_en_us    -> OptionId.WdkDownlevelContent
-#   package_Windows8.1WDKHeadersandLibs_x86_en_us  -> OptionId.WdkDownlevelContent
-#   package_WindowsDriverKit*                       -> OptionId.WindowsDriverKitComplete
+# VAN DE: runner windows-2022 da co san WDK 10.0.26100.7705.  Khi chay bundle
+# WDK 19041, Burn detect cac package cua no la "Obsolete" (vi da co version
+# moi hon) -> chuyen sang luong Modify/Repair -> hien UI
+# "Microsoft.Bootstrapper.Presentation.LocationPage" va CHO MAI, du da co /q.
+# (Da xac nhan trong Burn log cua run 39608128701.)
 #
-# "WindowsDriverKitComplete" MOT chon 3 package downlevel -> Lib\win7, Lib\win8,
-# Lib\winv6.3 bi thieu -> VirtualBox khong link duoc driver GA.
+# GIAI PHAI: BO QUA hoan toan apply phase cua Burn:
+#   1. wdksetup.exe /layout  -> chi TAI payload (WixBundleAction=2, khong UI)
+#   2. msiexec /i truc tiep cho tung MSI can thiet
+# Cach nay cung loai bo van de "Another instance of kit installer is already
+# running" do bundle bi kill nua de giu global mutex.
 # ---------------------------------------------------------------------------
 $wdkOk = $true
 if (-not $SkipWdk) {
+    # Don installer cu bi treo (giu global mutex).
+    foreach ($procName in @('wdksetup', 'winsdksetup', 'msiexec')) {
+        Get-Process -Name $procName -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Note "killing stale $($_.ProcessName) (pid $($_.Id))"; $_.Kill() }
+    }
+    Start-Sleep -Seconds 3
+
     $wdkExe = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
     Write-Step "Downloading WDK bootstrapper ($WdkUrl)"
     Invoke-WebRequest -Uri $WdkUrl -OutFile $wdkExe -UseBasicParsing
 
-    $wdkFeatures = @('OptionId.WindowsDriverKitComplete', 'OptionId.WdkDownlevelContent')
+    $layoutDir = if ($LayoutDir) { $LayoutDir } else { Join-Path $env:RUNNER_TEMP 'wdk-layout' }
+    $existing = Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue
+    if ($existing.Count -gt 0) {
+        Write-Step "Layout da co san ($($existing.Count) MSI) - bo qua tai lai"
+    }
+    else {
+        if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force -ErrorAction SilentlyContinue }
+        $null = New-Item -ItemType Directory -Force -Path $layoutDir
 
-    Write-Step "Installing WDK $KitVersion (features: $($wdkFeatures -join ', '))"
-    $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList (@('/features') + $wdkFeatures + @('/q', '/ceip', 'off', '/norestart')) -TimeoutSeconds 1500
-    Save-BurnLog
+        Write-Step "Downloading WDK layout to $layoutDir (chi tai, khong apply)"
+        $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList @('/layout', $layoutDir, '/quiet', '/ceip', 'off') -TimeoutSeconds 2400
+        Save-BurnLog
+    }
 
-    $wdkOk = Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib")
-    $w7Ok = Test-Path (Join-Path $KitsRoot 'Lib\win7\km\x64\ntoskrnl.lib')
+    $msis = Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue
+    Write-Step "Layout contains $($msis.Count) MSI package(s)"
 
-    if (-not ($wdkOk -and $w7Ok)) {
-        Write-Host "    direct install incomplete (wdk=$wdkOk win7=$w7Ok) - trying layout fallback" -ForegroundColor Yellow
-        $layoutDir = Join-Path $env:RUNNER_TEMP 'wdk-layout'
-        $null = Install-Layout -Exe $wdkExe -LayoutDir $layoutDir -LayoutFeatures $wdkFeatures
+    # Doc ProductName cua tung MSI de chon dung (khong doan ten file).
+    $installer = $null
+    try { $installer = New-Object -ComObject WindowsInstaller.Installer } catch { }
 
-        # Neu layout co MSI cua 3 bo lib downlevel -> cai truc tiep bang msiexec.
-        $downlevel = @(
-            @{ Pattern = '*Windows7WDKHeadersandLibs*.msi';   Marker = 'Lib\win7\km\x64' },
-            @{ Pattern = '*Windows8WDKHeadersandLibs*.msi';   Marker = 'Lib\win8\km\x64' },
-            @{ Pattern = '*Windows8.1WDKHeadersandLibs*.msi'; Marker = 'Lib\winv6.3\km\x64' }
-        )
-        foreach ($dl in $downlevel) {
-            if (Test-Path -LiteralPath (Join-Path $KitsRoot $dl.Marker)) {
-                Write-Step "$($dl.Marker) already present - skip"
-                continue
+    $inventory = [System.Collections.Generic.List[string]]::new()
+    $byName = @{}
+    foreach ($msi in $msis) {
+        $productName = ''
+        if ($installer) {
+            try {
+                $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi.FullName, 0))
+                $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT `Value` FROM `Property` WHERE `Property`='ProductName'"))
+                $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+                $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+                if ($rec) {
+                    $productName = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
+                }
             }
-            $msi = Get-ChildItem -Path $layoutDir -Filter $dl.Pattern -Recurse -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if (-not $msi) {
-                Write-Host "    MSI for $($dl.Marker) not found in layout" -ForegroundColor Yellow
-                continue
-            }
-            Write-Step "Installing downlevel lib pack: $($msi.Name)"
-            $rc2 = Invoke-Bootstrapper -Exe 'msiexec.exe' `
-                -Arguments @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart')
-            if ($rc2 -ne 0 -and $rc2 -ne 3010) {
-                Write-Host "    msiexec failed for $($msi.Name)" -ForegroundColor Yellow
-            }
+            catch { }
+        }
+        if (-not $productName) { $productName = $msi.BaseName }
+        $inventory.Add("$($msi.Name)`t$productName")
+        $byName[$productName] = $msi.FullName
+    }
+    $inventory | Set-Content -Path 'wdk-msi-inventory.txt' -Encoding utf8
+    Write-Note 'MSI inventory written to wdk-msi-inventory.txt'
+
+    # Cac MSI can thiet cho VirtualBox.
+    $wanted = @(
+        'Windows Driver Kit Headers and Libraries',
+        'Windows 7 WDK Headers and Libraries',
+        'Windows 8 WDK Headers and Libraries',
+        'Windows 8.1 WDK Headers and Libraries',
+        'Windows Driver Kit',
+        'Windows Driver Framework Headers and Libraries'
+    )
+
+    $selected = [System.Collections.Generic.List[string]]::new()
+    foreach ($w in $wanted) {
+        if ($byName.ContainsKey($w)) {
+            $selected.Add($byName[$w])
+            Write-Note "selected: $w"
         }
     }
+    if ($selected.Count -eq 0) {
+        Write-Host '    khong khop ten MSI nao -> cai tat ca (tru bo Debugging)' -ForegroundColor Yellow
+        foreach ($msi in $msis) {
+            if ($msi.Name -notmatch 'Debugg') { $selected.Add($msi.FullName) }
+        }
+    }
+
+    foreach ($path in $selected) {
+        Write-Step "Installing $(Split-Path $path -Leaf)"
+        $rc2 = Invoke-Bootstrapper -Exe 'msiexec.exe' `
+            -Arguments @('/i', "`"$path`"", '/qn', '/norestart') -TimeoutSeconds 900
+        if ($rc2 -ne 0 -and $rc2 -ne 3010) {
+            Write-Host "    msiexec failed ($rc2) for $(Split-Path $path -Leaf)" -ForegroundColor Yellow
+        }
+    }
+
+    $wdkOk = Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib")
 }
 
 # ---------------------------------------------------------------------------
@@ -297,11 +346,13 @@ if ($missing.Count -gt 0) {
     Write-Host 'MISSING kit directories:' -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     Write-Host ''
-    Write-Host 'Nguyên nhan thuong gap:' -ForegroundColor Yellow
+    Write-Host 'Nguyên nhân thường gặp:' -ForegroundColor Yellow
+    Write-Host '  * Runner GH da co san WDK 10.0.26100 -> bundle 19041 bi Burn xep' -ForegroundColor Yellow
+    Write-Host '    "Obsolete" -> vao luong Modify/Repair -> treo UI. Script da bypass' -ForegroundColor Yellow
+    Write-Host '    Burn bang cach tai layout roi msiexec truc tiep.' -ForegroundColor Yellow
+    Write-Host '  * Layout co MSI can dung (xem wdk-msi-inventory.txt) khong?' -ForegroundColor Yellow
     Write-Host '  * Bo lib downlevel (win7/win8/winv6.3) do feature "OptionId.WdkDownlevelContent"' -ForegroundColor Yellow
-    Write-Host '    cung cap. Neu thieu -> can WDK <= 10.0.20348 va feature id dung.' -ForegroundColor Yellow
-    Write-Host '  * WDK >= 10.0.22621 khong ship lib win7/win8.' -ForegroundColor Yellow
-    Write-Host '  * WDK >= 10.0.22000 khong ship lib KM x86.' -ForegroundColor Yellow
+    Write-Host '    cung cap. Neu thieu -> can WDK <= 10.0.20348.' -ForegroundColor Yellow
     exit 1
 }
 

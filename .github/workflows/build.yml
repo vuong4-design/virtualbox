@@ -498,14 +498,24 @@ jobs:
           [System.IO.File]::WriteAllLines($file, $lines, [System.Text.UTF8Encoding]::new($false));
           Write-Host "Patched line $($idx + 1).";
 
+      - name: Cache WDK layout
+        uses: actions/cache@v4
+        with:
+          path: .wdk-layout
+          key: wdk-layout-10.0.19041.0
+          restore-keys: |
+            wdk-layout-
+
       - name: Install Windows SDK 10.0.19041 + WDK
         # Gioi han thoi gian: installer WDK tai ~2-3 GB, co the bi treo.
-        timeout-minutes: 45
+        timeout-minutes: 60
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop";
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
-          & ".\.github\scripts\install-wdk.ps1" -KitVersion $env:KIT_VERSION;
+          & ".\.github\scripts\install-wdk.ps1" `
+            -KitVersion $env:KIT_VERSION `
+            -LayoutDir "${{ github.workspace }}\.wdk-layout";
           if ($LASTEXITCODE -ne 0) {
             throw "install-wdk.ps1 failed with exit code $LASTEXITCODE";
           }
@@ -754,6 +764,7 @@ jobs:
             source-revision.txt
             wdk-layout-info.txt
             wdk-kit-tree.txt
+            wdk-msi-inventory.txt
             wdk-burn-*.log
             wdk-layout-listing.txt
             wdk-kits-tree.txt

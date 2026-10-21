@@ -1111,17 +1111,60 @@ Exception: collect-identity.ps1:173
 
 ##### Lỗi G — `full-additions` treo trong WDK bootstrapper
 
-Không lấy được log của job đang chạy (API trả 404 tới khi job kết thúc), nhưng đã xử lý bằng 3 thay đổi:
+**Đã tìm ra nguyên nhân gốc** (nhờ bước *"Collect WDK installer diagnostics"* + `wdk-burn-*.log`):
 
-1. **Timeout**: `Invoke-Bootstrapper` nhận thêm `-TimeoutSeconds` (mặc định 1800) → kill process
-   con khi quá hạn, thay vì treo tới hết `timeout-minutes: 420` của job.
-2. **Step-level timeout**: bước *"Install Windows SDK 10.0.19041 + WDK"* có `timeout-minutes: 45`.
-3. **Thu thập log Burn**: `Save-BurnLog` copy log WiX Burn
-   (`%TEMP%\wdk\Windows_Driver_Kit___Windows_10.0.19041.5738_*.log`) ra `wdk-burn.log`, và thêm
-   bước *"Collect WDK installer diagnostics"* (if: always()) in log Burn + listing layout + cây
-   `Windows Kits\10\Lib` → upload vào artifact `virtualbox-additions-build-diagnostics`.
+```
+i101: Detected package: package_WindowsDriverKit_x86_en_us, state: Obsolete, cached: None
+i101: Detected package: package_OEMTestCertificates_x86_en_us, state: Obsolete, cached: None
+...
+i000: Navigated to Microsoft.Bootstrapper.Presentation.LocationPage
+i199: Detect complete, result: 0x0
+            ↓ (log hết ở đây — chờ input)
+```
 
-→ Lần CI kế tiếp sẽ cho biết chính xác nó kẹt ở đâu (tải package? MSI? reboot?).
+**Runner `windows-2022` đã có sẵn WDK 10.0.26100.7705.** Khi chạy bundle WDK **19041**, Burn thấy các
+package của nó bị **Obsolete** (vì đã có version mới hơn) → chuyển sang luồng **Modify/Repair** →
+điều hướng tới `Microsoft.Bootstrapper.Presentation.LocationPage` → **hiện UI và chờ mãi**, dù đã
+truyền `/q`. Luồng Modify bắt buộc phải có UI.
+
+Hệ quả thứ hai (log thứ 2 của run đó):
+
+```
+e000: Another instance of kit installer is already running.
+i500: Shutting down, exit code: 0x652
+```
+
+→ Bundle bị kill (timeout 25 phút của ta) vẫn **giữ global mutex** → lần layout fallback abort ngay.
+
+**Fix (đã áp dụng): bypass hoàn toàn apply phase của Burn.**
+
+1. Kill mọi process `wdksetup` / `winsdksetup` / `msiexec` còn sót trước khi bắt đầu (để giải phóng mutex).
+2. `wdksetup.exe /layout <dir> /quiet` → **chỉ tải payload** (`WixBundleAction=2`, không có apply
+   phase ⇒ không có Modify UI ⇒ không treo).
+3. Đọc `ProductName` của từng MSI trong layout (qua COM `WindowsInstaller.Installer`) → chọn đúng:
+   - `Windows Driver Kit Headers and Libraries` → `Lib\10.0.19041.0\km\*`
+   - `Windows 7 WDK Headers and Libraries` → `Lib\win7\km\*`
+   - `Windows 8 WDK Headers and Libraries` → `Lib\win8\km\*`
+   - `Windows 8.1 WDK Headers and Libraries` → `Lib\winv6.3\km\*`
+   - `Windows Driver Kit` (tools: rc.exe, inf2cat…) + `Windows Driver Framework Headers and Libraries`
+4. `msiexec /i <msi> /qn /norestart` cho từng MSI đã chọn (không qua Burn ⇒ không Modify UI).
+
+Ngoài ra:
+- **Cache layout** (`actions/cache`, key `wdk-layout-10.0.19041.0`) để không tải lại 3-4 GB mỗi run.
+  Script tự bỏ qua bước tải nếu layout đã có MSI.
+- `wdk-msi-inventory.txt` (tên file ↔ ProductName của mọi MSI trong layout) vào artifact để lần sau
+  đối chiếu tên chính xác.
+
+> **Bài học (đã ghi nhận):** trên runner có **kit mới hơn đã cài**, bundle **cũ hơn** sẽ rơi vào luồng
+> Modify và treo. Cách duy nhất đáng tin: **tải layout + `msiexec` trực tiếp**, không dùng Burn apply.
+
+##### Trạng thái run `39608128701`
+
+| Job | Kết quả | Ghi chú |
+|---|---|---|
+| `build` | ✅ success (30 phút) | Build VirtualBox đầy đủ |
+| `smoke` | ✅ **success** | Thiết kế lại chạy được (xem Lỗi F) |
+| `full-additions` | ❌ fail ở bước WDK | Đã sửa (Lỗi G) |
 
 
 
