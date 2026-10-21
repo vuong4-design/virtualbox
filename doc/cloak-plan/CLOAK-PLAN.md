@@ -1009,6 +1009,70 @@ Tôi đã khẳng định trong §4.7.5 rằng *"WDK 10.0.19041 là bản duy nh
 
 Đã sửa lại bằng cách cài MSI trực tiếp như trên.
 
+##### Lỗi C — run `39573977038`: layout của WDK **không có** `layout.exe`
+
+```
+==> Downloading WDK layout to D:\a\_temp\wdk-layout (~2 GB, goi 1 lan)
+    wdksetup.exe /layout -> exit 0
+Exception: install-wdk.ps1:183
+  layout.exe not found under D:\a\_temp\wdk-layout - WDK layout is incomplete.
+```
+
+→ Giả định "layout của WiX Burn luôn có `layout.exe`" là **sai** với WDK 19041.
+
+**Đã tìm ra cách đúng:** trích **Burn manifest** của `wdksetup.exe` (nằm trong PE section `.wixburn`,
+UX container là file CAB). Manifest cho ra bảng **package → `KITSOPTION`**:
+
+| Package | `KITSOPTION` (feature id) |
+|---|---|
+| `package_WindowsDriverKit_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_WindowsDriverKitHeadersandLibs_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_WindowsDriverKitBinaries_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_WindowsDriverFrameworkHeadersandLibs_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_WindowsDebuggingWDKIntegration_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_WindowsDriverKitSxSContent_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| `package_OEMTestCertificates_x86_en_us` | `OptionId.WindowsDriverKitComplete` |
+| **`package_Windows7WDKHeadersandLibs_x86_en_us`** | **`OptionId.WdkDownlevelContent`** |
+| **`package_Windows8WDKHeadersandLibs_x86_en_us`** | **`OptionId.WdkDownlevelContent`** |
+| **`package_Windows8.1WDKHeadersandLibs_x86_en_us`** | **`OptionId.WdkDownlevelContent`** |
+| `package_WindowsDriverKitARM*` | `OptionId.WindowsDriverKitARMAddons` |
+| `package_WindowsDriverKit*Dev16Content` | `OptionId.WDKVisualStudioDev16` |
+| `package_WindowsDriverKitDownlevelDev14Content` | `OptionId.WDKVisualStudioDownlevel` |
+| `package_SDKARM*` | `OptionId.ARMSoftwareDevelopmentKit` |
+| `package_SDKDebuggersARM` | `OptionId.ARMWindowsDesktopDebuggers` |
+| `package_MinimalWLPCContent` | `OptionId.MinWLPC` |
+| `package_KitsConfigurationInstaller` | `OptionId.KitsConfiguration` |
+
+→ **Fix cuối cùng (đã áp dụng):** cài trực tiếp với **cả hai** feature:
+
+```powershell
+wdksetup.exe /features OptionId.WindowsDriverKitComplete OptionId.WdkDownlevelContent /q /ceip off /norestart
+```
+
+Không cần layout nữa. Layout + `msiexec` chỉ còn làm **fallback** (phòng khi feature id đổi theo version).
+
+##### Lỗi D — job `build` bị **cancelled** (không phải lỗi compile)
+
+Run `39573977038`:
+- `full-additions` fail lúc **09:05:38**
+- `build` bị cancelled lúc **09:07:14** (đang compile OpenSSL)
+
+Các dòng `kmk: *** [...crypto_asn1/p5_pbe.obj] Error 4 (0x4)` là **hậu quả** của việc `cl.exe` bị kill
+(không có bất kỳ diagnostic nào của compiler) → không phải lỗi compile thật.
+
+Đã xác nhận fix `VBOX_SVN_REV` **có hiệu lực**: log in ra `Using VBOX_SVN_REV = 115387` và lỗi
+C2561 ở `buildconfig.cpp` **đã biến mất**; build tiến được tới bước compile OpenSSL.
+
+Nguyên nhân cancel: khả năng cao là người dùng bấm "Cancel workflow" khi thấy job `full-additions` đỏ
+(hoặc do `concurrency` khi có push mới). Không có lỗi disk / OOM trong log.
+
+##### Ghi chú: toolset MSVC
+
+Log cho thấy OpenSSL được compile bằng **MSVC 14.29.30133** (toolset VS2019) dù `msvc-dev-cmd` đã
+đưa 14.44 (VS2022) vào `PATH` — vì kBuild tự dò toolchain qua `$(PATH_TOOL_MSVC_*)`, không dùng PATH
+của action. Chưa có bằng chứng là vấn đề (không có diagnostic nào), nhưng nếu build OpenSSL lỗi thì
+đây là điểm đầu tiên cần kiểm tra.
+
 
 
 ---

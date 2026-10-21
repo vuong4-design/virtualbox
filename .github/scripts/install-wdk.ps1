@@ -11,16 +11,19 @@
         <Kits>\Lib\win7\km\x64\*.lib       lib nhắm Windows 7  (WINSDK10-KM-W7)
         <Kits>\Lib\win8\km\x64\*.lib       lib nhắm Windows 8  (WINSDK10-KM-W8)
 
-    WDK >= 10.0.22621 KHÔNG còn lib win7/win8, và WDK >= 10.0.22000 KHÔNG còn
-    lib KM x86.  WDK 10.0.19041 là bản duy nhất còn CẢ hai, nên ta ghim version này.
+    Về version:
+      - WDK >= 10.0.22621 KHÔNG còn lib win7/win8.
+      - WDK >= 10.0.22000 KHÔNG còn lib KM x86.
+      - -> WDK 10.0.19041 là bản DUY NHẤT còn cả hai -> ghim version này.
+
+    Về feature id của WDK (đã trích từ Burn manifest của wdksetup.exe):
+      OptionId.WindowsDriverKitComplete   -> WDK chính (headers+libs 10.0.19041.0)
+      OptionId.WdkDownlevelContent        -> 3 package Win7/Win8/Win8.1 WDK headers+libs
+                                             (KHÔNG nằm trong feature "Complete"!)
 
     Tham khảo:
       - https://learn.microsoft.com/en-us/windows-hardware/drivers/other-wdk-downloads
-      - https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk
-
-    Cách cài: bootstrapper chính thức của Microsoft. Mỗi kit được thử theo 2 cách:
-      1. cài trực tiếp (silent) với feature id
-      2. tải layout rồi chạy layout.exe (fallback khi feature id cũ bị gỡ)
+      - https://learn.microsoft.com/en-us/windows-hardware/drivers/legacy-wdk-downloads
 
 .PARAMETER KitVersion
     Phiên bản SDK/WDK cài đặt, ví dụ '10.0.19041.0'.
@@ -53,9 +56,6 @@ function Write-Note {
 }
 
 function Invoke-Bootstrapper {
-    <#
-        Chạy 1 bootstrapper với các tham số đã cho, trả về exit code.
-    #>
     param(
         [string] $Exe,
         [string[]] $Arguments
@@ -65,99 +65,78 @@ function Invoke-Bootstrapper {
     return $proc.ExitCode
 }
 
-function Install-Kit {
+function Install-Layout {
     <#
-        Cài 1 kit (SDK hoặc WDK):
-          1. tải bootstrapper
-          2. thử cài trực tiếp
-          3. nếu thất bại -> thử layout + layout.exe
-        Trả về $true nếu có vẻ thành công.
+        Tai layout (chua toan bo MSI) roi cai layout.exe.
+        Dung khi cai truc tiep that bai.
     #>
     param(
-        [string] $Url,
-        [string] $ExeName,
-        [string[]] $DirectArgs,
-        [string] $LayoutFeature,
-        [scriptblock] $Verify
+        [string] $Exe,
+        [string] $LayoutDir,
+        [string[]] $LayoutFeatures
     )
-
-    $exe = Join-Path $env:RUNNER_TEMP $ExeName
-    Write-Step "Downloading $ExeName ($Url)"
-    Invoke-WebRequest -Uri $Url -OutFile $exe -UseBasicParsing
-
-    Write-Step "Installing $ExeName (direct)"
-    $rc = Invoke-Bootstrapper -Exe $exe -Arguments $DirectArgs
-    if ((& $Verify)) {
-        Write-Step "$ExeName installed."
-        return $true
-    }
-    if ($rc -ne 0 -and $rc -ne 3010) {
-        Write-Host "    direct install returned $rc, trying layout fallback" -ForegroundColor Yellow
-    }
-
-    Write-Step "Installing $ExeName (layout fallback)"
-    $layoutDir = Join-Path $env:RUNNER_TEMP "$ExeName-layout"
-    $null = New-Item -ItemType Directory -Force -Path $layoutDir
-
-    $layoutArgs = @('/layout', $layoutDir, '/quiet', '/ceip', 'off')
-    if ($LayoutFeature) { $layoutArgs = @('/features', $LayoutFeature, '/layout', $layoutDir, '/quiet', '/ceip', 'off') }
-    $rc = Invoke-Bootstrapper -Exe $exe -Arguments $layoutArgs
+    $null = New-Item -ItemType Directory -Force -Path $LayoutDir
+    $args = @('/layout', $LayoutDir, '/quiet', '/ceip', 'off')
+    if ($LayoutFeatures) { $args = @('/features') + $LayoutFeatures + $args }
+    $rc = Invoke-Bootstrapper -Exe $Exe -Arguments $args
     if ($rc -ne 0 -and $rc -ne 3010) {
         Write-Host "    layout download returned $rc" -ForegroundColor Yellow
         return $false
     }
-
-    $layoutExe = Get-ChildItem -Path $layoutDir -Filter 'layout.exe' -Recurse -ErrorAction SilentlyContinue |
+    $layoutExe = Get-ChildItem -Path $LayoutDir -Filter 'layout.exe' -Recurse -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if (-not $layoutExe) {
-        Write-Host "    layout.exe not found under $layoutDir - layout incomplete" -ForegroundColor Yellow
+        Write-Host "    layout.exe not found under $LayoutDir - layout incomplete" -ForegroundColor Yellow
         return $false
     }
-
     $rc = Invoke-Bootstrapper -Exe $layoutExe.FullName -Arguments @('/quiet', '/norestart', '/ceip', 'off')
-    if ($rc -ne 0 -and $rc -ne 3010) {
-        Write-Host "    layout.exe returned $rc" -ForegroundColor Yellow
-        return $false
-    }
-
-    if ((& $Verify)) {
-        Write-Step "$ExeName installed (via layout)."
-        return $true
-    }
-    Write-Host "    ${ExeName}: verification still failing after layout install" -ForegroundColor Yellow
-    return $false
+    return ($rc -eq 0 -or $rc -eq 3010)
 }
 
 # ---------------------------------------------------------------------------
 # 1. Windows SDK
+#
+# Runner image (windows-2022) da co san nhieu version SDK, gom 10.0.19041.0
+# -> thuong da co, khong can cai.  Van thu cai neu thieu.
 # ---------------------------------------------------------------------------
 $sdkOk = $true
 if (-not $SkipSdk) {
-    $sdkOk = Install-Kit -Url $SdkUrl -ExeName 'winsdksetup.exe' `
-        -DirectArgs @(
+    $sdkPresent = Test-Path (Join-Path $KitsRoot "Include\$KitVersion\um\windows.h")
+    if ($sdkPresent) {
+        Write-Step "Windows SDK $KitVersion already installed - skip"
+    }
+    else {
+        $sdkExe = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
+        Write-Step "Downloading Windows SDK bootstrapper ($SdkUrl)"
+        Invoke-WebRequest -Uri $SdkUrl -OutFile $sdkExe -UseBasicParsing
+
+        Write-Step "Installing Windows SDK $KitVersion"
+        $rc = Invoke-Bootstrapper -Exe $sdkExe -ArgumentList @(
             '/features', "OptionId.WindowsDesktopSDK-$KitVersion", 'OptionId.DesktopCPPx64',
             '/q', '/ceip', 'off', '/norestart'
-        ) `
-        -LayoutFeature "OptionId.WindowsDesktopSDK-$KitVersion" `
-        -Verify { Test-Path (Join-Path $KitsRoot "Include\$KitVersion\um\windows.h") }
+        )
+        $sdkOk = Test-Path (Join-Path $KitsRoot "Include\$KitVersion\um\windows.h")
+        if (-not $sdkOk) {
+            Write-Host "    direct install did not produce the SDK - trying layout" -ForegroundColor Yellow
+            $null = Install-Layout -Exe $sdkExe -LayoutDir (Join-Path $env:RUNNER_TEMP 'sdk-layout') `
+                -LayoutFeatures @("OptionId.WindowsDesktopSDK-$KitVersion")
+            $sdkOk = Test-Path (Join-Path $KitsRoot "Include\$KitVersion\um\windows.h")
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
 # 2. Windows Driver Kit
 #
-# WDK 19041 co 26 package, trong do 3 package dinh nghia bo lib "downlevel"
-# (Windows 7 / 8 / 8.1) -- nhung feature "WindowsDriverKitComplete" KHONG chon
-# cac package do (log cua installer: "ba requested: None, execute: None").
+# Feature id that can trich truc tiep tu Burn manifest cua wdksetup.exe
+# (MsiProperty KITSOPTION cua tung package):
+#   package_Windows7WDKHeadersandLibs_x86_en_us    -> OptionId.WdkDownlevelContent
+#   package_Windows8WDKHeadersandLibs_x86_en_us    -> OptionId.WdkDownlevelContent
+#   package_Windows8.1WDKHeadersandLibs_x86_en_us  -> OptionId.WdkDownlevelContent
+#   package_WindowsDriverKit*                       -> OptionId.WindowsDriverKitComplete
 #
-#   package_Windows7WDKHeadersandLibs_x86_en_us    -> Lib\win7\km\*
-#   package_Windows8WDKHeadersandLibs_x86_en_us    -> Lib\win8\km\*
-#   package_Windows8.1WDKHeadersandLibs_x86_en_us  -> Lib\winv6.3\km\*
-#
-# Feature id cua chung khong doan duoc (bootstrapper chi bao loi "not available"
-# cho id sai, khong liet ke id hop le).  => Dung layout + msiexec truc tiep:
-#   1. tai layout (chua toan bo MSI)
-#   2. cai layout.exe (bo mac dinh)
-#   3. cai rieng 3 MSI downlevel bang msiexec
+# "WindowsDriverKitComplete" MOT chon 3 package downlevel -> Lib\win7, Lib\win8,
+# Lib\winv6.3 bi thieu -> VirtualBox khong link duoc driver GA.
 # ---------------------------------------------------------------------------
 $wdkOk = $true
 if (-not $SkipWdk) {
@@ -165,72 +144,53 @@ if (-not $SkipWdk) {
     Write-Step "Downloading WDK bootstrapper ($WdkUrl)"
     Invoke-WebRequest -Uri $WdkUrl -OutFile $wdkExe -UseBasicParsing
 
-    $layoutDir = Join-Path $env:RUNNER_TEMP 'wdk-layout'
-    $null = New-Item -ItemType Directory -Force -Path $layoutDir
+    $wdkFeatures = @('OptionId.WindowsDriverKitComplete', 'OptionId.WdkDownlevelContent')
 
-    Write-Step "Downloading WDK layout to $layoutDir (~2 GB, goi 1 lan)"
-    $proc = Start-Process -FilePath $wdkExe `
-        -ArgumentList @('/layout', $layoutDir, '/quiet', '/ceip', 'off') `
-        -Wait -PassThru -NoNewWindow
-    Write-Host "    wdksetup.exe /layout -> exit $($proc.ExitCode)"
-    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-        throw "WDK layout download failed with exit code $($proc.ExitCode)"
-    }
-
-    $layoutExe = Get-ChildItem -Path $layoutDir -Filter 'layout.exe' -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $layoutExe) {
-        throw "layout.exe not found under $layoutDir - WDK layout is incomplete."
-    }
-
-    Write-Step "Installing WDK default feature set"
-    $proc = Start-Process -FilePath $layoutExe.FullName `
-        -ArgumentList @('/quiet', '/norestart', '/ceip', 'off') `
-        -Wait -PassThru -NoNewWindow
-    Write-Host "    layout.exe -> exit $($proc.ExitCode)"
-
-    # Cai rieng 3 bo lib downlevel (Win7 / Win8 / 8.1) neu chua co.
-    $downlevel = @(
-        @{ Pattern = '*Windows7WDKHeadersandLibs*.msi';   Marker = 'Lib\win7\km\x64' },
-        @{ Pattern = '*Windows8WDKHeadersandLibs*.msi';   Marker = 'Lib\win8\km\x64' },
-        @{ Pattern = '*Windows8.1WDKHeadersandLibs*.msi'; Marker = 'Lib\winv6.3\km\x64' }
-    )
-
-    foreach ($dl in $downlevel) {
-        $markerPath = Join-Path $KitsRoot $dl.Marker
-        if (Test-Path -LiteralPath $markerPath) {
-            Write-Step "$($dl.Marker) already present - skip"
-            continue
-        }
-
-        $msi = Get-ChildItem -Path $layoutDir -Filter $dl.Pattern -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if (-not $msi) {
-            Write-Host "    MSI for $($dl.Marker) not found in layout" -ForegroundColor Yellow
-            continue
-        }
-
-        Write-Step "Installing downlevel lib pack: $($msi.Name)"
-        $proc = Start-Process -FilePath 'msiexec.exe' `
-            -ArgumentList @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart') `
-            -Wait -PassThru -NoNewWindow
-        Write-Host "    msiexec -> exit $($proc.ExitCode)"
-        if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-            Write-Host "    msiexec failed for $($msi.Name)" -ForegroundColor Yellow
-        }
-    }
+    Write-Step "Installing WDK $KitVersion (features: $($wdkFeatures -join ', '))"
+    $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList (@('/features') + $wdkFeatures + @('/q', '/ceip', 'off', '/norestart'))
 
     $wdkOk = Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib")
+    $w7Ok = Test-Path (Join-Path $KitsRoot 'Lib\win7\km\x64\ntoskrnl.lib')
+
+    if (-not ($wdkOk -and $w7Ok)) {
+        Write-Host "    direct install incomplete (wdk=$wdkOk win7=$w7Ok) - trying layout fallback" -ForegroundColor Yellow
+        $layoutDir = Join-Path $env:RUNNER_TEMP 'wdk-layout'
+        $null = Install-Layout -Exe $wdkExe -LayoutDir $layoutDir -LayoutFeatures $wdkFeatures
+
+        # Neu layout co MSI cua 3 bo lib downlevel -> cai truc tiep bang msiexec.
+        $downlevel = @(
+            @{ Pattern = '*Windows7WDKHeadersandLibs*.msi';   Marker = 'Lib\win7\km\x64' },
+            @{ Pattern = '*Windows8WDKHeadersandLibs*.msi';   Marker = 'Lib\win8\km\x64' },
+            @{ Pattern = '*Windows8.1WDKHeadersandLibs*.msi'; Marker = 'Lib\winv6.3\km\x64' }
+        )
+        foreach ($dl in $downlevel) {
+            if (Test-Path -LiteralPath (Join-Path $KitsRoot $dl.Marker)) {
+                Write-Step "$($dl.Marker) already present - skip"
+                continue
+            }
+            $msi = Get-ChildItem -Path $layoutDir -Filter $dl.Pattern -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if (-not $msi) {
+                Write-Host "    MSI for $($dl.Marker) not found in layout" -ForegroundColor Yellow
+                continue
+            }
+            Write-Step "Installing downlevel lib pack: $($msi.Name)"
+            $rc2 = Invoke-Bootstrapper -Exe 'msiexec.exe' `
+                -Arguments @('/i', "`"$($msi.FullName)`"", '/qn', '/norestart')
+            if ($rc2 -ne 0 -and $rc2 -ne 3010) {
+                Write-Host "    msiexec failed for $($msi.Name)" -ForegroundColor Yellow
+            }
+        }
+    }
 }
 
 # ---------------------------------------------------------------------------
-# 3. Kiểm tra các thư mục mà VirtualBox cần
+# 3. Kiem tra cac thu muc ma VirtualBox can
 # ---------------------------------------------------------------------------
 Write-Step "Verifying required kit directories under $KitsRoot"
 
-# Ghi cay cay kit da cai dat -> artifact de debug khi co thay doi.
+# Dump cay kit da cai -> artifact de debug khi co thay doi.
 $treeFile = 'wdk-kit-tree.txt'
-Write-Step "Dumping kit tree to $treeFile"
 @(
     "=== Lib ==="
     (Get-ChildItem -Path (Join-Path $KitsRoot 'Lib') -Directory -ErrorAction SilentlyContinue |
@@ -248,6 +208,7 @@ Write-Step "Dumping kit tree to $treeFile"
             }
         })
 ) | Set-Content -Path $treeFile -Encoding utf8
+Write-Note "kit tree written to $treeFile"
 
 $required = @(
     @{ Path = "Include\$KitVersion\km";            Desc = 'KM headers' },
@@ -284,7 +245,6 @@ foreach ($r in $optional) {
     }
 }
 
-# Ghi lại cho workflow dùng.
 $kitsInfo = [ordered]@{
     kits_root    = $KitsRoot
     kit_version  = $KitVersion
@@ -304,13 +264,11 @@ if ($missing.Count -gt 0) {
     Write-Host 'MISSING kit directories:' -ForegroundColor Red
     $missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     Write-Host ''
-    Write-Host 'Nguyên nhân thường gặp:' -ForegroundColor Yellow
+    Write-Host 'Nguyên nhan thuong gap:' -ForegroundColor Yellow
+    Write-Host '  * Bo lib downlevel (win7/win8/winv6.3) do feature "OptionId.WdkDownlevelContent"' -ForegroundColor Yellow
+    Write-Host '    cung cap. Neu thieu -> can WDK <= 10.0.20348 va feature id dung.' -ForegroundColor Yellow
     Write-Host '  * WDK >= 10.0.22621 khong ship lib win7/win8.' -ForegroundColor Yellow
-    Write-Host '    -> can WDK <= 10.0.20348 (bo "Windows 10 2004" 19041.5738).' -ForegroundColor Yellow
     Write-Host '  * WDK >= 10.0.22000 khong ship lib KM x86.' -ForegroundColor Yellow
-    Write-Host '    -> can WDK <= 10.0.20348.' -ForegroundColor Yellow
-    Write-Host '  * Feature id cua Windows SDK 10.0.19041 co the da bi go khoi' -ForegroundColor Yellow
-    Write-Host '    dich vu tai ve -> can dung layout fallback (script da thu).' -ForegroundColor Yellow
     exit 1
 }
 
