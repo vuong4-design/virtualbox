@@ -71,6 +71,10 @@
 
 #include <VBox/err.h>
 
+#ifndef DECLSPEC_XFGVIRT
+# define DECLSPEC_XFGVIRT(base, func)
+#endif
+
 namespace com
 {
 
