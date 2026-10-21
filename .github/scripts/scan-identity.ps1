@@ -63,9 +63,10 @@ $needles = [ordered]@{
 
 # Cac file can quet
 $files = @(
-    'VBoxDD.dll', 'VBoxVMM.dll', 'VBoxC.dll', 'VBoxSVC.exe',
-    'VirtualBox.exe', 'VirtualBoxVM.dll', 'VBoxRT.dll'
-) | Where-Object { Test-Path (Join-Path $VBoxDir $_) }
+    @('VBoxDD.dll', 'VBoxVMM.dll', 'VBoxC.dll', 'VBoxSVC.exe',
+      'VirtualBox.exe', 'VirtualBoxVM.dll', 'VBoxRT.dll') |
+        Where-Object { Test-Path (Join-Path $VBoxDir $_) }
+)
 
 if ($files.Count -eq 0) {
     Write-Host "ERROR: no VirtualBox binaries found in $VBoxDir" -ForegroundColor Red

@@ -1084,6 +1084,14 @@ của action. Chưa có bằng chứng là vấn đề (không có diagnostic n�
 → **Fix `VBOX_SVN_REV` đã được xác nhận hoạt động**: job `build` build thành công toàn bộ
 VirtualBox (core + GUI Qt6 + driver deps). Đây là nền tảng cần thiết.
 
+##### Trạng thái run `39608128701`
+
+| Job | Kết quả | Ghi chú |
+|---|---|---|
+| `build` | ✅ success (30 phút) | Build VirtualBox đầy đủ |
+| `smoke` | ✅ **success** | Thiết kế lại chạy được (xem Lỗi F) |
+| `full-additions` | ❌ fail ở bước WDK | Đã sửa (Lỗi G) |
+
 ##### Lỗi F — `smoke` fail: `VERR_VM_DRIVER_NOT_INSTALLED`
 
 ```
@@ -1158,13 +1166,60 @@ Ngoài ra:
 > **Bài học (đã ghi nhận):** trên runner có **kit mới hơn đã cài**, bundle **cũ hơn** sẽ rơi vào luồng
 > Modify và treo. Cách duy nhất đáng tin: **tải layout + `msiexec` trực tiếp**, không dùng Burn apply.
 
-##### Trạng thái run `39608128701`
+##### Lỗi H — run `39614054361`: PowerShell StrictMode + `$null.Count`
 
-| Job | Kết quả | Ghi chú |
-|---|---|---|
-| `build` | ✅ success (30 phút) | Build VirtualBox đầy đủ |
-| `smoke` | ✅ **success** | Thiết kế lại chạy được (xem Lỗi F) |
-| `full-additions` | ❌ fail ở bước WDK | Đã sửa (Lỗi G) |
+```
+==> Windows SDK 10.0.19041.0 already installed - skip
+==> Downloading WDK bootstrapper (https://go.microsoft.com/fwlink/?linkid=2342425)
+install-wdk.ps1: The property 'Count' cannot be found on this object. Verify that the property exists.
+```
+
+**Nguyên nhân (lỗi script của tôi, không phải lỗi môi trường):**
+
+```powershell
+$existing = Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue
+if ($existing.Count -gt 0) { ... }
+```
+
+Khi `Get-ChildItem` **không tìm thấy gì** nó trả về `$null` (không phải mảng rỗng) → `$null.Count`
+→ dưới `Set-StrictMode -Version Latest` → **terminating error**.
+
+Đã tái hiện và kiểm chứng cục bộ:
+
+```
+old: ERROR -> The property 'Count' cannot be found on this object. Verify that the property exists.
+new: empty (OK, khong loi)   new: count = 0
+```
+
+**Fix:** luôn ép kiểu mảng: `@(Get-ChildItem ...)`. Đã áp dụng cho `$existing` và `$msis` trong
+`install-wdk.ps1`, và `$files` trong `scan-identity.ps1`.
+
+##### Lỗi I — MSI SQL string bị PowerShell ăn mất backtick
+
+Trong code đọc `ProductName` của MSI, truy vấn phải giữ backtick quanh reserved word:
+
+```powershell
+# SAI: double-quoted -> PowerShell xu ly backtick nhu escape -> mat backtick
+$view = ... @("SELECT `Value` FROM `Property` WHERE `Property`='ProductName'")
+# -> SELECT Value FROM Property WHERE Property='ProductName'   (MSI SQL bi loi)
+
+# DUNG: single-quoted -> giu nguyen backtick
+$query = 'SELECT `Value` FROM `Property` WHERE `Property`=''ProductName'''
+# -> SELECT `Value` FROM `Property` WHERE `Property`='ProductName'   (OK)
+```
+
+Đã sửa. (Dù không sửa thì script vẫn chạy được nhờ fallback "cài tất cả MSI", nhưng sẽ tải
+thêm gói debugger ~1.5 GB.)
+
+##### Quy tắc rút ra cho mọi script CI
+
+| Quy tắc | Lý do |
+|---|---|
+| Luôn bọc `@(...)` quanh kết quả cmdlet trước khi dùng `.Count` | `$null.Count` → lỗi dưới StrictMode |
+| Dùng single-quoted string cho MSI SQL / WMI query có backtick | PowerShell coi backtick là escape char |
+| Bọc mọi lời gọi native bằng try/catch + tắt `$ErrorActionPreference` tạm thời | `2>&1` + `EAP=Stop` → terminating error |
+| Luôn có `-TimeoutSeconds` cho process con | Không muốn job treo hàng giờ |
+| Luôn upload log chẩn đoán (`if: always()`) | Không đọc được log của job đang chạy |
 
 
 

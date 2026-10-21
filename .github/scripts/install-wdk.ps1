@@ -187,7 +187,9 @@ if (-not $SkipWdk) {
     Invoke-WebRequest -Uri $WdkUrl -OutFile $wdkExe -UseBasicParsing
 
     $layoutDir = if ($LayoutDir) { $LayoutDir } else { Join-Path $env:RUNNER_TEMP 'wdk-layout' }
-    $existing = Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue
+    # Luon ep thanh mang: Get-ChildItem tra $null khi khong tim thay gi,
+    # va $null.Count se loi duoi Set-StrictMode.
+    $existing = @(Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue)
     if ($existing.Count -gt 0) {
         Write-Step "Layout da co san ($($existing.Count) MSI) - bo qua tai lai"
     }
@@ -200,7 +202,7 @@ if (-not $SkipWdk) {
         Save-BurnLog
     }
 
-    $msis = Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue
+    $msis = @(Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue)
     Write-Step "Layout contains $($msis.Count) MSI package(s)"
 
     # Doc ProductName cua tung MSI de chon dung (khong doan ten file).
@@ -214,7 +216,11 @@ if (-not $SkipWdk) {
         if ($installer) {
             try {
                 $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi.FullName, 0))
-                $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT `Value` FROM `Property` WHERE `Property`='ProductName'"))
+                # Chuoi MSI SQL phai dung backtick quanh reserved word -> dung
+                # single-quoted string de giu nguyen backtick (double-quoted se
+                # bi PowerShell bien thanh escape).
+                $query = 'SELECT `Value` FROM `Property` WHERE `Property`=''ProductName'''
+                $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($query))
                 $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
                 $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
                 if ($rec) {
