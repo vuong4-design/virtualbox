@@ -58,11 +58,42 @@ function Write-Note {
 function Invoke-Bootstrapper {
     param(
         [string] $Exe,
-        [string[]] $Arguments
+        [string[]] $Arguments,
+        [int]    $TimeoutSeconds = 1800
     )
-    $proc = Start-Process -FilePath $Exe -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
+    $proc = Start-Process -FilePath $Exe -ArgumentList $Arguments -PassThru -NoNewWindow
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Host "    TIMEOUT after $TimeoutSeconds s - killing $Exe" -ForegroundColor Red
+        try { $proc.Kill() } catch { }
+        Start-Sleep -Seconds 3
+        return -1
+    }
     Write-Note "$([System.IO.Path]::GetFileName($Exe)) $($Arguments -join ' ') -> exit $($proc.ExitCode)"
     return $proc.ExitCode
+}
+
+function Save-BurnLog {
+    <#
+        Luu log cua WiX Burn bootstrapper (de giup debug khi installer treo).
+        Burn ghi log vao %TEMP%\<ten>\<WixBundleName>_<timestamp>.log
+    #>
+    $out = 'wdk-burn.log'
+    $found = $false
+    foreach ($dir in @($env:TEMP, (Join-Path $env:TEMP 'wdk'))) {
+        if (-not (Test-Path $dir)) { continue }
+        $logs = Get-ChildItem -Path $dir -Filter '*.log' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'Driver_Kit|SDK' -or $_.DirectoryName -match 'wdk' } |
+            Sort-Object LastWriteTime -Descending
+        if ($logs) {
+            $logs | Select-Object -First 1 | ForEach-Object {
+                Copy-Item $_.FullName $out -Force
+                Write-Note "burn log: $($_.FullName)"
+            }
+            $found = $true
+            break
+        }
+    }
+    if (-not $found) { Write-Note 'no burn log found' }
 }
 
 function Install-Layout {
@@ -89,7 +120,8 @@ function Install-Layout {
         Write-Host "    layout.exe not found under $LayoutDir - layout incomplete" -ForegroundColor Yellow
         return $false
     }
-    $rc = Invoke-Bootstrapper -Exe $layoutExe.FullName -Arguments @('/quiet', '/norestart', '/ceip', 'off')
+    $rc = Invoke-Bootstrapper -Exe $layoutExe.FullName -Arguments @('/quiet', '/norestart', '/ceip', 'off') -TimeoutSeconds 1500
+    Save-BurnLog
     return ($rc -eq 0 -or $rc -eq 3010)
 }
 
@@ -147,7 +179,8 @@ if (-not $SkipWdk) {
     $wdkFeatures = @('OptionId.WindowsDriverKitComplete', 'OptionId.WdkDownlevelContent')
 
     Write-Step "Installing WDK $KitVersion (features: $($wdkFeatures -join ', '))"
-    $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList (@('/features') + $wdkFeatures + @('/q', '/ceip', 'off', '/norestart'))
+    $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList (@('/features') + $wdkFeatures + @('/q', '/ceip', 'off', '/norestart')) -TimeoutSeconds 1500
+    Save-BurnLog
 
     $wdkOk = Test-Path (Join-Path $KitsRoot "Lib\$KitVersion\km\x64\ntoskrnl.lib")
     $w7Ok = Test-Path (Join-Path $KitsRoot 'Lib\win7\km\x64\ntoskrnl.lib')

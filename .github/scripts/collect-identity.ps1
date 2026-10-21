@@ -40,7 +40,8 @@ param(
     [string] $HardwareUuid = '9f2c1d40-7a51-4c62-9b8e-0d3a5e6f7c81',
     [string] $Chipset     = '',
     [string] $Firmware    = '',
-    [int]    $BootWaitSeconds = 20
+    [int]    $BootWaitSeconds = 20,
+    [switch] $RequireRuntime
 )
 
 Set-StrictMode -Version Latest
@@ -110,7 +111,44 @@ $null = New-Item -ItemType Directory -Force -Path $OutDir
 Write-Step "Using VBoxManage: $script:VBoxManage"
 
 # ---------------------------------------------------------------------------
-# Tạo VM (xóa nếu đã có) với hardware UUID cố định
+# 0. Kiem tra co the chay VM that khong
+#
+# VirtualBox tren Windows can VBoxDrv (kernel driver) + nested virtualization
+# (VT-x) de chay may ao. GitHub-hosted runner KHONG co ca hai:
+#   - VBoxDrv chua duoc cai -> "VERR_VM_DRIVER_NOT_INSTALLED"
+#   - Azure runner khong expose nested virtualization
+# => Phase 1 (capture runtime) chi chay khi co runtime target.
+# ---------------------------------------------------------------------------
+function Test-RuntimeAvailable {
+    $driver = Join-Path $env:SystemRoot 'System32\drivers\VBoxDrv.sys'
+    if (Test-Path -LiteralPath $driver) { return $true }
+
+    # Da dang ky service?
+    $svc = Get-Service -Name 'VBoxDrv' -ErrorAction SilentlyContinue
+    if ($svc) { return $true }
+
+    return $false
+}
+
+$runtimeAvailable = Test-RuntimeAvailable
+if (-not $runtimeAvailable) {
+    Write-Host 'RUNTIME_TARGET_UNAVAILABLE' -ForegroundColor Yellow
+    Write-Host '  - VBoxDrv (kernel driver) chua duoc cai tren may nay' -ForegroundColor Yellow
+    Write-Host '  - runner nay cung khong co nested virtualization' -ForegroundColor Yellow
+    if ($RequireRuntime) {
+        Write-Host 'ERROR: -RequireRuntime duoc dat nhung khong co runtime target.' -ForegroundColor Red
+        exit 3
+    }
+    Write-Host '  -> BO QUA phase capture runtime (khong phai loi).' -ForegroundColor Yellow
+    Write-Host '  -> De verify identity that runtime, hay chay script nay tren may co VBoxDrv' -ForegroundColor Yellow
+    Write-Host '     (hoac tren self-hosted runner / VM local).' -ForegroundColor Yellow
+}
+else {
+    Write-Step 'Runtime target available (VBoxDrv present).'
+}
+
+# ---------------------------------------------------------------------------
+# 1. Tao VM (xoa neu da co) voi hardware UUID co dinh
 # ---------------------------------------------------------------------------
 Write-Step "Preparing VM '$VmName' (hardwareuuid=$HardwareUuid, chipset='$Chipset', firmware='$Firmware')"
 
@@ -194,6 +232,24 @@ function Invoke-Capture {
         $null = Invoke-VBoxManage 'controlvm' $VmName 'poweroff'
         Start-Sleep -Seconds 5
     }
+}
+
+# ---------------------------------------------------------------------------
+# 2. Capture runtime (chi khi co runtime target)
+# ---------------------------------------------------------------------------
+if (-not $runtimeAvailable) {
+    Write-Step 'Skipping runtime capture (no runtime target).'
+    @(
+        "RUNTIME_TARGET_UNAVAILABLE",
+        "vm=$VmName",
+        "hardwareuuid=$HardwareUuid",
+        "chipset=$Chipset",
+        "firmware=$Firmware",
+        "created=$(Get-Date -Format o)"
+    ) | Set-Content -Path (Join-Path $OutDir 'identity.txt') -Encoding utf8
+    'RUNTIME_TARGET_UNAVAILABLE' | Set-Content -Path (Join-Path $OutDir 'stability.txt') -Encoding utf8
+    Write-Step 'Done (config-only verification).'
+    exit 0
 }
 
 Invoke-Capture -RunDir (Join-Path $OutDir 'run1')

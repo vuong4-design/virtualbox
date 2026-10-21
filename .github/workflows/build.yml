@@ -499,6 +499,8 @@ jobs:
           Write-Host "Patched line $($idx + 1).";
 
       - name: Install Windows SDK 10.0.19041 + WDK
+        # Gioi han thoi gian: installer WDK tai ~2-3 GB, co the bi treo.
+        timeout-minutes: 45
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop";
@@ -506,6 +508,42 @@ jobs:
           & ".\.github\scripts\install-wdk.ps1" -KitVersion $env:KIT_VERSION;
           if ($LASTEXITCODE -ne 0) {
             throw "install-wdk.ps1 failed with exit code $LASTEXITCODE";
+          }
+
+      - name: Collect WDK installer diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue";
+          Write-Host "=== WDK burn logs ===";
+          $logs = @();
+          foreach ($dir in @($env:TEMP, (Join-Path $env:TEMP 'wdk'))) {
+            if (Test-Path $dir) {
+              $logs += Get-ChildItem -Path $dir -Filter '*.log' -Recurse -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -match 'Driver_Kit|Windows_Driver' }
+            }
+          }
+          foreach ($l in $logs) {
+            Write-Host "--- $($l.FullName) ---";
+            Get-Content $l.FullName -Tail 120 -ErrorAction SilentlyContinue;
+            Copy-Item $l.FullName "wdk-burn-$($l.Name)" -Force -ErrorAction SilentlyContinue;
+          }
+          Write-Host "=== layout dir ===";
+          $layout = Join-Path $env:RUNNER_TEMP 'wdk-layout';
+          if (Test-Path $layout) {
+            Get-ChildItem $layout -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -First 80 FullName, Length | Format-Table -AutoSize | Out-String -Width 200 |
+              Tee-Object -FilePath 'wdk-layout-listing.txt';
+          }
+          Write-Host "=== kits tree ===";
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10";
+          if (Test-Path $kits) {
+            Get-ChildItem "$kits\Lib" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+              $km = Join-Path $_.FullName 'km'
+              if (Test-Path $km) {
+                "$($_.Name)\km -> " + ((Get-ChildItem $km -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }) -join ',')
+              }
+            } | Tee-Object -FilePath 'wdk-kits-tree.txt'
           }
 
       - name: Install Yasm runtime and verify
@@ -715,6 +753,10 @@ jobs:
             env.bat
             source-revision.txt
             wdk-layout-info.txt
+            wdk-kit-tree.txt
+            wdk-burn-*.log
+            wdk-layout-listing.txt
+            wdk-kits-tree.txt
             *.log
             out/**/*.log
 
@@ -768,6 +810,14 @@ jobs:
         shell: cmd
         run: vbox\VBoxSVC.exe /RegServer
 
+      - name: Scan built binaries for identity strings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\scan-identity.ps1" -VBoxDir "vbox" -OutFile "binary-identity.txt";
+          if ($LASTEXITCODE -ne 0) { throw "scan-identity.ps1 failed: $LASTEXITCODE" }
+
       - name: Collect guest-visible identity (ICH9 + BIOS)
         shell: pwsh
         run: |
@@ -814,6 +864,7 @@ jobs:
           if-no-files-found: warn
           path: |
             identity-out/
+            binary-identity.txt
 
       - name: Summarise identity
         if: always()

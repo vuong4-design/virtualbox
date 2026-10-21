@@ -1073,6 +1073,56 @@ Log cho thấy OpenSSL được compile bằng **MSVC 14.29.30133** (toolset VS2
 của action. Chưa có bằng chứng là vấn đề (không có diagnostic nào), nhưng nếu build OpenSSL lỗi thì
 đây là điểm đầu tiên cần kiểm tra.
 
+##### Lỗi E — run `39576116092`: job `build` **THÀNH CÔNG**, `full-additions` **TREO**
+
+| Job | Kết quả | Thời gian |
+|---|---|---|
+| `build` | ✅ **success** (build VirtualBox đầy đủ) | 09:20:00 → 10:08:43 (48 phút) |
+| `full-additions` | ⏳ **in_progress** — kẹt ở *"Install Windows SDK 10.0.19041 + WDK"* | > 50 phút |
+| `smoke` | ❌ failure | 14 giây |
+
+→ **Fix `VBOX_SVN_REV` đã được xác nhận hoạt động**: job `build` build thành công toàn bộ
+VirtualBox (core + GUI Qt6 + driver deps). Đây là nền tảng cần thiết.
+
+##### Lỗi F — `smoke` fail: `VERR_VM_DRIVER_NOT_INSTALLED`
+
+```
+==> Starting VM (headless)
+Exception: collect-identity.ps1:173
+  VBoxManage startvm failed (exit 1): VBoxManage.exe: error: VirtualBox kernel driver not installed
+  (VERR_VM_DRIVER_NOT_INSTALLED)
+```
+
+**Nguyên nhân (không phải bug script):** GitHub-hosted runner **không thể chạy VM**:
+1. `VBoxDrv` (kernel driver host) chưa cài → `VERR_VM_DRIVER_NOT_INSTALLED`.
+2. Azure runner **không expose nested virtualization** → dù cài driver cũng không boot được VM.
+
+→ **Thiết kế lại job `smoke`:**
+
+| Việc | Cách làm mới |
+|---|---|
+| Verify binary đã build | **Quét chuỗi identity** trong `VBoxDD.dll` / `VBoxVMM.dll` / `VBoxC.dll` / `VirtualBox.exe` → `.github/scripts/scan-identity.ps1` → artifact `binary-identity.txt` (baseline để diff giữa 2 commit) |
+| Verify config plane | `VBoxManage createvm` + `showvminfo --machinereadable` (không cần `VBoxDrv`) — phần này **vẫn chạy được** |
+| Verify runtime plane | `collect-identity.ps1` tự dò `VBoxDrv`; nếu không có → ghi `RUNTIME_TARGET_UNAVAILABLE` và **exit 0** (không phải lỗi). Dùng `-RequireRuntime` để bắt buộc (chạy local/self-hosted) |
+| Yêu cầu "identity ổn định 2 lần mở VM" | **Chuyển sang test unit** cho phần selector của MPE (Phase 1.0) — hàm thuần `hash(vmUuid) → profile` test được mà không cần VM. Xem §4.6.4 |
+
+> Ghi chú: thuật ngữ `RUNTIME_TARGET_UNAVAILABLE` cố ý dùng y hệt phân loại Pass 129 trong tài liệu
+> phân tích cloak — cùng một bài toán: host phân tích không có runtime target để capture.
+
+##### Lỗi G — `full-additions` treo trong WDK bootstrapper
+
+Không lấy được log của job đang chạy (API trả 404 tới khi job kết thúc), nhưng đã xử lý bằng 3 thay đổi:
+
+1. **Timeout**: `Invoke-Bootstrapper` nhận thêm `-TimeoutSeconds` (mặc định 1800) → kill process
+   con khi quá hạn, thay vì treo tới hết `timeout-minutes: 420` của job.
+2. **Step-level timeout**: bước *"Install Windows SDK 10.0.19041 + WDK"* có `timeout-minutes: 45`.
+3. **Thu thập log Burn**: `Save-BurnLog` copy log WiX Burn
+   (`%TEMP%\wdk\Windows_Driver_Kit___Windows_10.0.19041.5738_*.log`) ra `wdk-burn.log`, và thêm
+   bước *"Collect WDK installer diagnostics"* (if: always()) in log Burn + listing layout + cây
+   `Windows Kits\10\Lib` → upload vào artifact `virtualbox-additions-build-diagnostics`.
+
+→ Lần CI kế tiếp sẽ cho biết chính xác nó kẹt ở đâu (tải package? MSI? reboot?).
+
 
 
 ---
@@ -1089,8 +1139,8 @@ của action. Chưa có bằng chứng là vấn đề (không có diagnostic n�
 | 0.1 | Tạo branch `feature/cloak` từ `VBox-7.2` | — | `git branch` |
 | 0.2 | Chứng minh build Windows **cục bộ** chạy được | `configure.vbs` → `env.bat` + `AutoConfig.kmk` | Build sạch không lỗi |
 | 0.3 | **Sửa workflow CI** (checkout + trigger + revision log) | `.github/workflows/build.yml` | ✅ **đã làm** — xem [§4.7.7](#477-danh-sách-task-ci-cụ-thể-phase-0) |
-| 0.4 | Thêm job `smoke` (verify identity + ổn định) | `.github/workflows/build.yml`, `.github/scripts/collect-identity.ps1` | ✅ **đã làm** (3 kịch bản) |
-| 0.4b | Thêm job `full-additions` + WDK | `.github/workflows/build.yml`, `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
+| 0.4 | Thêm job `smoke` | `.github/workflows/build.yml`, `.github/scripts/collect-identity.ps1`, `.github/scripts/scan-identity.ps1` | ✅ **đã làm** — nhưng **runner GH không chạy được VM** (không có VBoxDrv / nested virt) → đã đổi sang: quét binary + config plane; runtime plane tự dò `VBoxDrv` và skip nếu không có |
+| 0.4b | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — WDK cài được nhưng **treo** ở bước install → đã thêm timeout (25 phút) + thu thập log WiX Burn |
 | 0.5 | Rewrite path pcbios ↔ efi trong CFGM overlay | `ConsoleImplConfigCommon.cpp:724-843` | Set `VBoxInternal/Devices/pcbios/0/Config/DmiBIOSVendor` → guest thấy ở cả BIOS và EFI mode |
 | 0.6 | Hạ tầng test: script so sánh guest-visible identity giữa 2 build | `.github/scripts/collect-identity.ps1` ✅ (phần CI) | Chạy được trên VM Windows + Linux |
 | 0.7 | Baseline identity để so sánh (artifact từ build stock) | artifact `cloak-identity-report` | Có 1 bộ giá trị reference cho VM mẫu |
