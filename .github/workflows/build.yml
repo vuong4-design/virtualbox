@@ -1,0 +1,459 @@
+name: Build VirtualBox 7.2 (Windows x64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - VBox-7.2
+      - 'feature/cloak*'
+  pull_request:
+    branches:
+      - main
+      - VBox-7.2
+      - 'feature/cloak*'
+
+permissions:
+  contents: read
+
+# Huỷ run cũ khi push mới lên cùng branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 360
+
+    env:
+      VBOX_SOURCE: ${{ github.workspace }}
+      KBUILD_PATH: ${{ github.workspace }}\kBuild\kBuild
+      VBOX_WITHOUT_ADDITIONS: "1"
+      VBOX_WITH_ADDITIONS_PACKING: ""
+
+    steps:
+      - name: Checkout VirtualBox
+        uses: actions/checkout@v4
+        with:
+          # QUAN TRỌNG: phải build repo NÀY, không phải mirror upstream.
+          # Trước đây workflow checkout "repository: VirtualBox/virtualbox" nên
+          # mọi thay đổi trong repo của chúng ta đều không được compile.
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Record source revision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $sha    = git rev-parse HEAD;
+          $desc   = git log -1 --pretty="%h %s";
+          $branch = git rev-parse --abbrev-ref HEAD;
+          $rev = @(
+            "source_repo=${{ github.repository }}",
+            "source_ref=${{ github.ref_name }}",
+            "source_sha=$sha",
+            "source_desc=$desc",
+            "source_branch=$branch"
+          );
+          $rev | Set-Content -Path "source-revision.txt" -Encoding utf8;
+          Get-Content "source-revision.txt";
+
+      - name: Setup MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Verify kBuild and Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== Source directory ==="
+          Write-Host $env:VBOX_SOURCE
+
+          Write-Host "=== kBuild directory ==="
+          Write-Host $env:KBUILD_PATH
+
+          $required = @(
+            "footer.kmk",
+            "header.kmk",
+            "rules.kmk",
+            "bin\win.amd64\kmk.exe",
+            "bin\win.amd64\kmk_ash.exe",
+            "bin\win.x86\kmk.exe"
+          )
+
+          foreach ($item in $required) {
+            # Sử dụng nối chuỗi trực tiếp để vô hiệu hóa lỗi mất khoảng trắng
+            $path = "$env:KBUILD_PATH\$item"
+            if (-not (Test-Path $path)) {
+              throw "Missing required kBuild file: $path"
+            }
+            Write-Host "OK: $path"
+          }
+
+          $sdk = "C:\Program Files (x86)\Windows Kits\10"
+          
+          # Nối chuỗi trực tiếp cho thư mục SDK Include
+          if (-not (Test-Path "$sdk\Include")) {
+            throw "Windows 10 SDK Include directory not found: $sdk"
+          }
+
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw "cl.exe not found. MSVC environment was not initialized."
+          }
+
+          Write-Host "=== Compiler ==="
+          cl.exe 2>&1 | Select-Object -First 3
+
+          Write-Host "=== SDK versions ==="
+          Get-ChildItem "$sdk\Include" -Directory |
+            Where-Object { $_.Name -like "10.0.*" } |
+            Select-Object -ExpandProperty Name
+
+      - name: Patch legacy DDK 7.1 check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $file = "$env:VBOX_SOURCE\configure.vbs";
+
+          if (-not (Test-Path $file)) {
+            throw "configure.vbs not found: $file";
+          }
+
+          # Sử dụng dấu chấm phẩy (;) để ngăn lỗi dính dòng khi copy/paste
+          $lines = [System.IO.File]::ReadAllLines($file);
+          $matches = @();
+
+          for ($i = 2000; $i -lt $lines.Length; $i++) {
+            if ($lines[$i].Contains("CheckForWinDDK") -and $lines[$i].Contains("strOptDDK") -and $lines[$i] -notmatch '^\s*(sub|function)\b') {
+              $matches += $i;
+            }
+          }
+
+          if ($matches.Count -ne 1) {
+            throw "Expected one DDK check call; found $($matches.Count).";
+          }
+
+          $idx = $matches[0];
+          Write-Host "Original line $($idx + 1): $($lines[$idx])";
+
+          $lines[$idx] = "    ' Experimental: skip legacy DDK 7.1 configure check";
+
+          [System.IO.File]::WriteAllLines($file, $lines, [System.Text.UTF8Encoding]::new($false));
+          Write-Host "Patched line $($idx + 1).";
+
+      - name: Install Yasm runtime and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          choco install vcredist2010 -y --no-progress;
+
+          $url = "https://github.com/yasm/yasm/releases/download/v1.3.0/yasm-1.3.0-win64.exe";
+          # Sử dụng nối chuỗi trực tiếp để tránh lỗi Join-Path
+          $dir = "$env:RUNNER_TEMP\yasm";
+          $exe = "$dir\yasm.exe";
+
+          # Gán biến $null thay vì dùng dấu pipe (| Out-Null)
+          $null = New-Item -ItemType Directory -Force -Path $dir;
+          Invoke-WebRequest -Uri $url -OutFile $exe;
+
+          Write-Host "=== Yasm version ===";
+          $output = & $exe --version 2>&1;
+          $exitCode = $LASTEXITCODE;
+          
+          # Dùng vòng lặp foreach thay vì dùng dấu pipe (| ForEach-Object)
+          foreach ($line in $output) { Write-Host $line }
+
+          if ($exitCode -ne 0) {
+            throw "Yasm failed to start (exit code $exitCode). Check missing DLL dependencies.";
+          }
+
+          $joinedOutput = $output -join "`n";
+          if ($joinedOutput -notmatch 'yasm\s+1\.3\.0') {
+            throw "Expected Yasm 1.3.0.";
+          }
+
+          Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8;
+          Write-Host "Yasm 1.3.0 is ready.";
+
+      # BƯỚC MỚI: Cài đặt Qt5 để biên dịch giao diện VirtualBox.exe
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.0'
+          arch: 'win64_msvc2022_64'
+          modules: 'qt5compat qtscxml'
+          cache: true
+
+      - name: Setup libSDL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $sdl_url = "https://www.libsdl.org/release/SDL-devel-1.2.15-VC.zip";
+          $sdl_dir = "$env:RUNNER_TEMP\SDL";
+          $null = New-Item -ItemType Directory -Force -Path $sdl_dir;
+          
+          Invoke-WebRequest -Uri $sdl_url -OutFile "$sdl_dir\sdl.zip";
+          Expand-Archive -Path "$sdl_dir\sdl.zip" -DestinationPath $sdl_dir -Force;
+          
+          $sdl_path = "$sdl_dir\SDL-1.2.15";
+          $libDir = "$sdl_path\lib";
+          $libX64 = "$libDir\x64";
+          
+          if (Test-Path $libX64) {
+            Copy-Item -Path "$libX64\*" -Destination $libDir -Force;
+          }
+          
+          Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8;
+          Write-Host "Installed libSDL to $sdl_path";
+
+      - name: Configure VirtualBox
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          $sdk = "C:\Program Files (x86)\Windows Kits\10";
+          $binDir = "$sdk\bin";
+          
+          $latestSdk = (Get-ChildItem -Path $binDir -Directory | Where-Object { $_.Name -like "10.0.*" } | Sort-Object Name -Descending | Select-Object -First 1).Name;
+          
+          $srcX64 = "$binDir\$latestSdk\x64";
+          $dstX64 = "$binDir\x64";
+          if (-not (Test-Path $dstX64)) { $null = New-Item -ItemType Directory -Force -Path $dstX64; }
+          Copy-Item -Path "$srcX64\*" -Destination $dstX64 -Recurse -Force;
+
+          $srcX86 = "$binDir\$latestSdk\x86";
+          $dstX86 = "$binDir\x86";
+          if (-not (Test-Path $dstX86)) { $null = New-Item -ItemType Directory -Force -Path $dstX86; }
+          Copy-Item -Path "$srcX86\*" -Destination $dstX86 -Recurse -Force;
+
+          Write-Host "=== Configure VirtualBox ===";
+          $qtDir = $env:QT_ROOT_DIR -replace '\\', '/';
+
+          & cscript.exe //nologo configure.vbs "--with-SDK10=$sdk" "--with-libSDL=$env:VBOX_SDL_PATH" "--with-Qt=$qtDir";
+
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "configure.log") { Get-Content "configure.log" -Tail 200; }
+            throw "VirtualBox configure failed with exit code $LASTEXITCODE.";
+          }
+
+          # Ép bật Qt6 GUI trực tiếp vào LocalConfig.kmk (phòng trường hợp configure.vbs bỏ sót Qt6)
+          $localCfg = @(
+            "VBOX_WITH_QTGUI = 1",
+            "VBOX_GUI_USE_QGL = 1",
+            "PATH_SDK_QT6 = $qtDir",
+            "PATH_TOOL_QT6 = $qtDir",
+            "PATH_TOOL_QT6_BIN = $qtDir/bin",
+            "VBOX_PATH_QT = $qtDir",
+            "VBOX_WITH_HARDENING = ",
+            "VBOX_WITHOUT_ADDITIONS = 1",
+            "VBOX_WITH_ADDITIONS_PACKING = ",
+            "VBOX_WITH_WARNINGS_AS_ERRORS = ",
+            "VBOX_WITH_TESTCASES = ",
+            "VBOX_WITH_VALIDATIONKIT = "
+          );
+          Set-Content -Path "LocalConfig.kmk" -Value $localCfg -Encoding utf8;
+
+          Write-Host "=== AutoConfig.kmk Content ===";
+          if (Test-Path "AutoConfig.kmk") { Get-Content "AutoConfig.kmk"; }
+
+      - name: Build VirtualBox
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          # Đưa thư mục bin của Qt6 (chứa lrelease.exe, moc.exe, uic.exe) vào PATH hiện tại
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:PATH";
+
+          $kmk = "$env:KBUILD_PATH\bin\win.amd64\kmk.exe";
+          $jobs = [Environment]::ProcessorCount;
+          Write-Host "Build jobs: $jobs";
+
+          # Chạy build toàn bộ (ĐÃ BỎ VBOX_WITH_NLS= để build đầy đủ giao diện)
+          & $kmk "-j$jobs";
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "kmk build failed with exit code $LASTEXITCODE.";
+          }
+
+      # 2. Kiểm tra file thực thi và đóng gói kèm toàn bộ DLL cần thiết
+      - name: Verify and Bundle Dependencies
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+          $binOut = "out\win.amd64\release\bin";
+
+          if (-not (Test-Path $binOut)) {
+            throw "Output bin directory not found: $binOut";
+          }
+
+          # Copy SDL.dll vào thư mục bin
+          if (Test-Path "$env:VBOX_SDL_PATH\lib\SDL.dll") {
+            Copy-Item -Path "$env:VBOX_SDL_PATH\lib\SDL.dll" -Destination $binOut -Force;
+          }
+
+          # Dùng windeployqt của Qt6 để tự động gom toàn bộ DLL giao diện vào thư mục bin
+          $vboxExe = "$binOut\VirtualBox.exe";
+          $windeployqt = "$env:QT_ROOT_DIR\bin\windeployqt.exe";
+          if ((Test-Path $vboxExe) -and (Test-Path $windeployqt)) {
+            Write-Host "Deploying Qt6 runtime DLLs for VirtualBox.exe...";
+            & $windeployqt --release --no-translations --no-compiler-runtime $vboxExe;
+          } else {
+            Write-Warning "VirtualBox.exe was not generated! Listing existing .exe files:";
+          }
+
+          Write-Host "=== Generated Executables (.exe) ===";
+          Get-ChildItem -Path $binOut -Filter "*.exe" | Select-Object Name, Length;
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtualbox-windows-build-diagnostics
+          if-no-files-found: warn
+          path: |
+            configure.log
+            AutoConfig.kmk
+            LocalConfig.kmk
+            Config.kmk
+            env.bat
+            source-revision.txt
+            *.log
+            out/**/*.log
+
+      - name: Upload CI scripts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloak-ci-scripts
+          if-no-files-found: error
+          path: .github/scripts/
+
+      - name: Upload VirtualBox Binaries
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtualbox-7.2-windows-amd64-binaries
+          if-no-files-found: error
+          path: |
+            out/win.amd64/release/bin/
+            !out/win.amd64/release/bin/**/*.obj
+            !out/win.amd64/release/bin/**/*.pdb
+            !out/win.amd64/release/bin/testcase/
+
+  # ---------------------------------------------------------------------
+  # Smoke test: chạy 1 VM headless và thu thập identity mà guest nhìn thấy.
+  #
+  # Mục tiêu:
+  #   1. Xác nhận binary build ra thực sự chạy được và enumerate PCI được.
+  #   2. Chứng minh identity ỔN ĐỊNH giữa 2 lần mở cùng 1 VM
+  #      (yêu cầu: random nhưng không đổi -> seed từ VM UUID).
+  #   3. Tạo artifact "identity" để so sánh giữa 2 commit/PR.
+  # ---------------------------------------------------------------------
+  smoke:
+    name: Smoke test (cloak identity)
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      # KHÔNG checkout ở job này: repo rất lớn (~1.4 GB pack) nên clone lần thứ hai
+      # rất tốn thời gian. Script được lấy từ artifact của job build.
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: virtualbox-7.2-windows-amd64-binaries
+          path: vbox
+
+      - name: Download build diagnostics
+        uses: actions/download-artifact@v4
+        with:
+          name: virtualbox-windows-build-diagnostics
+          path: diagnostics
+
+      - name: Download CI scripts
+        uses: actions/download-artifact@v4
+        with:
+          name: cloak-ci-scripts
+          path: scripts
+
+      - name: Show which revision was built
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "diagnostics\source-revision.txt") {
+            Get-Content "diagnostics\source-revision.txt"
+          } else {
+            Write-Warning "source-revision.txt not found in diagnostics artifact"
+          }
+
+      - name: Register COM server
+        shell: cmd
+        run: vbox\VBoxSVC.exe /RegServer
+
+      - name: Collect guest-visible identity (ICH9 + BIOS)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\collect-identity.ps1" `
+            -VBoxDir "vbox" `
+            -OutDir "identity-out\ich9-bios" `
+            -VmName "cloak-smoke-ich9-bios" `
+            -HardwareUuid "9f2c1d40-7a51-4c62-9b8e-0d3a5e6f7c81";
+          if ($LASTEXITCODE -ne 0) { throw "collect-identity (ich9-bios) failed: $LASTEXITCODE" }
+
+      - name: Collect guest-visible identity (PIIX3 + BIOS)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\collect-identity.ps1" `
+            -VBoxDir "vbox" `
+            -OutDir "identity-out\piix3-bios" `
+            -VmName "cloak-smoke-piix3-bios" `
+            -HardwareUuid "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" `
+            -Chipset "piix3";
+          if ($LASTEXITCODE -ne 0) { throw "collect-identity (piix3-bios) failed: $LASTEXITCODE" }
+
+      - name: Collect guest-visible identity (ICH9 + EFI)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\collect-identity.ps1" `
+            -VBoxDir "vbox" `
+            -OutDir "identity-out\ich9-efi" `
+            -VmName "cloak-smoke-ich9-efi" `
+            -HardwareUuid "2b3c4d5e-6f70-4b8c-9d0e-1f2a3b4c5d6e" `
+            -Firmware "efi";
+          if ($LASTEXITCODE -ne 0) { throw "collect-identity (ich9-efi) failed: $LASTEXITCODE" }
+
+      - name: Upload identity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloak-identity-report
+          if-no-files-found: warn
+          path: |
+            identity-out/
+
+      - name: Summarise identity
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem "identity-out" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Host "===== $($_.Name) =====";
+            $stability = Join-Path $_.FullName "stability.txt";
+            if (Test-Path $stability) { Get-Content $stability };
+          };
+          Write-Host "===== PCI identity (ich9-bios, run 1) =====";
+          $pci = "identity-out\ich9-bios\run1\info-pci.txt";
+          if (Test-Path $pci) { Get-Content $pci -TotalCount 100 };
