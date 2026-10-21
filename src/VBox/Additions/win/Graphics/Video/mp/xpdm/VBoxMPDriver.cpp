@@ -39,6 +39,10 @@
 #include <iprt/initterm.h>
 #include <VBox/version.h>
 
+#ifndef VIDEO_CHILD_ACTIVE
+# define VIDEO_CHILD_ACTIVE 0x00000001
+#endif
+
 
 /*********************************************************************************************************************************
 *   Global Variables                                                                                                             *
