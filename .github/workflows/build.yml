@@ -349,6 +349,355 @@ jobs:
             !out/win.amd64/release/bin/testcase/
 
   # ---------------------------------------------------------------------
+  # Job build kèm Guest Additions (cần WDK).
+  #
+  # Tách riêng khỏi job "build" vì:
+  #   - job "build" nhanh, không cần WDK -> dùng để gate PR hằng ngày.
+  #   - job này lâu hơn ~nửa và cần WDK -> chỉ cần khi đụng tới Guest Additions
+  #     (PR-2: đổi tên driver/service/INF của GA).
+  #
+  # VỀ WDK (đã tra cứu tài liệu Microsoft):
+  #   - VirtualBox cần lib kernel-mode cho driver GA:
+  #       Include\<ver>\km\*.h        header KM
+  #       Lib\<ver>\km\{x64,x86}\     lib KM (WINSDK10-KM)
+  #       Lib\win7\km\x64             lib nhắm Win7 (WINSDK10-KM-W7, và -WLH dùng
+  #                                  bộ lib Win7 vì WDK 10 không còn lib Vista)
+  #       Lib\win8\km\x64             lib nhắm Win8 (WINSDK10-KM-W8)
+  #   - WDK >= 10.0.22621 KHÔNG còn lib win7/win8.
+  #   - WDK >= 10.0.22000 KHÔNG còn lib KM x86.
+  #   -> WDK 10.0.19041 là bản DUY NHẤT còn cả hai, nên job này ghim version đó.
+  #
+  #   Tham khảo:
+  #     https://learn.microsoft.com/en-us/windows-hardware/drivers/other-wdk-downloads
+  # ---------------------------------------------------------------------
+  full-additions:
+    name: Build with Guest Additions (WDK 10.0.19041)
+    runs-on: windows-2022
+    timeout-minutes: 420
+
+    env:
+      VBOX_SOURCE: ${{ github.workspace }}
+      KBUILD_PATH: ${{ github.workspace }}\kBuild\kBuild
+      VBOX_WITHOUT_ADDITIONS: ""
+      VBOX_WITH_ADDITIONS_PACKING: "1"
+      KIT_VERSION: "10.0.19041.0"
+
+    steps:
+      - name: Checkout VirtualBox
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Record source revision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $sha    = git rev-parse HEAD;
+          $desc   = git log -1 --pretty="%h %s";
+          $branch = git rev-parse --abbrev-ref HEAD;
+          $rev = @(
+            "source_repo=${{ github.repository }}",
+            "source_ref=${{ github.ref_name }}",
+            "source_sha=$sha",
+            "source_desc=$desc",
+            "source_branch=$branch"
+          );
+          $rev | Set-Content -Path "source-revision.txt" -Encoding utf8;
+          Get-Content "source-revision.txt";
+
+      - name: Setup MSVC x64 environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Verify kBuild and Windows SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== Source directory ==="
+          Write-Host $env:VBOX_SOURCE
+
+          Write-Host "=== kBuild directory ==="
+          Write-Host $env:KBUILD_PATH
+
+          $required = @(
+            "footer.kmk",
+            "header.kmk",
+            "rules.kmk",
+            "bin\win.amd64\kmk.exe",
+            "bin\win.amd64\kmk_ash.exe",
+            "bin\win.x86\kmk.exe"
+          )
+
+          foreach ($item in $required) {
+            $path = "$env:KBUILD_PATH\$item"
+            if (-not (Test-Path $path)) {
+              throw "Missing required kBuild file: $path"
+            }
+            Write-Host "OK: $path"
+          }
+
+          $sdk = "C:\Program Files (x86)\Windows Kits\10"
+          if (-not (Test-Path "$sdk\Include")) {
+            throw "Windows 10 SDK Include directory not found: $sdk"
+          }
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
+            throw "cl.exe not found. MSVC environment was not initialized."
+          }
+
+          Write-Host "=== SDK versions ==="
+          Get-ChildItem "$sdk\Include" -Directory |
+            Where-Object { $_.Name -like "10.0.*" } |
+            Select-Object -ExpandProperty Name
+
+      - name: Patch legacy DDK 7.1 check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $file = "$env:VBOX_SOURCE\configure.vbs";
+
+          if (-not (Test-Path $file)) {
+            throw "configure.vbs not found: $file";
+          }
+
+          $lines = [System.IO.File]::ReadAllLines($file);
+          $matches = @();
+
+          for ($i = 2000; $i -lt $lines.Length; $i++) {
+            if ($lines[$i].Contains("CheckForWinDDK") -and $lines[$i].Contains("strOptDDK") -and $lines[$i] -notmatch '^\s*(sub|function)\b') {
+              $matches += $i;
+            }
+          }
+
+          if ($matches.Count -ne 1) {
+            throw "Expected one DDK check call; found $($matches.Count).";
+          }
+
+          $idx = $matches[0];
+          Write-Host "Original line $($idx + 1): $($lines[$idx])";
+
+          $lines[$idx] = "    ' Experimental: skip legacy DDK 7.1 configure check";
+
+          [System.IO.File]::WriteAllLines($file, $lines, [System.Text.UTF8Encoding]::new($false));
+          Write-Host "Patched line $($idx + 1).";
+
+      - name: Install Windows SDK 10.0.19041 + WDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\.github\scripts\install-wdk.ps1" -KitVersion $env:KIT_VERSION;
+          if ($LASTEXITCODE -ne 0) {
+            throw "install-wdk.ps1 failed with exit code $LASTEXITCODE";
+          }
+
+      - name: Install Yasm runtime and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          choco install vcredist2010 -y --no-progress;
+
+          $url = "https://github.com/yasm/yasm/releases/download/v1.3.0/yasm-1.3.0-win64.exe";
+          $dir = "$env:RUNNER_TEMP\yasm";
+          $exe = "$dir\yasm.exe";
+
+          $null = New-Item -ItemType Directory -Force -Path $dir;
+          Invoke-WebRequest -Uri $url -OutFile $exe;
+
+          Write-Host "=== Yasm version ===";
+          $output = & $exe --version 2>&1;
+          $exitCode = $LASTEXITCODE;
+
+          foreach ($line in $output) { Write-Host $line }
+
+          if ($exitCode -ne 0) {
+            throw "Yasm failed to start (exit code $exitCode). Check missing DLL dependencies.";
+          }
+
+          $joinedOutput = $output -join "`n";
+          if ($joinedOutput -notmatch 'yasm\s+1\.3\.0') {
+            throw "Expected Yasm 1.3.0.";
+          }
+
+          Add-Content -Path $env:GITHUB_PATH -Value $dir -Encoding utf8;
+          Write-Host "Yasm 1.3.0 is ready.";
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.0'
+          arch: 'win64_msvc2022_64'
+          modules: 'qt5compat qtscxml'
+          cache: true
+
+      - name: Setup libSDL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          $sdl_url = "https://www.libsdl.org/release/SDL-devel-1.2.15-VC.zip";
+          $sdl_dir = "$env:RUNNER_TEMP\SDL";
+          $null = New-Item -ItemType Directory -Force -Path $sdl_dir;
+
+          Invoke-WebRequest -Uri $sdl_url -OutFile "$sdl_dir\sdl.zip";
+          Expand-Archive -Path "$sdl_dir\sdl.zip" -DestinationPath $sdl_dir -Force;
+
+          $sdl_path = "$sdl_dir\SDL-1.2.15";
+          $libDir = "$sdl_path\lib";
+          $libX64 = "$libDir\x64";
+
+          if (Test-Path $libX64) {
+            Copy-Item -Path "$libX64\*" -Destination $libDir -Force;
+          }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8;
+          Write-Host "Installed libSDL to $sdl_path";
+
+      - name: Configure VirtualBox (with Guest Additions)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          $sdk = "C:\Program Files (x86)\Windows Kits\10";
+          $binDir = "$sdk\bin";
+
+          $latestSdk = (Get-ChildItem -Path $binDir -Directory | Where-Object { $_.Name -like "10.0.*" } | Sort-Object Name -Descending | Select-Object -First 1).Name;
+
+          $srcX64 = "$binDir\$latestSdk\x64";
+          $dstX64 = "$binDir\x64";
+          if (-not (Test-Path $dstX64)) { $null = New-Item -ItemType Directory -Force -Path $dstX64; }
+          Copy-Item -Path "$srcX64\*" -Destination $dstX64 -Recurse -Force;
+
+          $srcX86 = "$binDir\$latestSdk\x86";
+          $dstX86 = "$binDir\x86";
+          if (-not (Test-Path $dstX86)) { $null = New-Item -ItemType Directory -Force -Path $dstX86; }
+          Copy-Item -Path "$srcX86\*" -Destination $dstX86 -Recurse -Force;
+
+          Write-Host "=== Configure VirtualBox ===";
+          $qtDir = $env:QT_ROOT_DIR -replace '\\', '/';
+
+          & cscript.exe //nologo configure.vbs "--with-SDK10=$sdk" "--with-libSDL=$env:VBOX_SDL_PATH" "--with-Qt=$qtDir";
+
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path "configure.log") { Get-Content "configure.log" -Tail 200; }
+            throw "VirtualBox configure failed with exit code $LASTEXITCODE.";
+          }
+
+          # LocalConfig.kmk: build Guest Additions, va thay bo DDK 7.1 bang WDK 10.
+          $localCfg = @(
+            "VBOX_WITH_QTGUI = 1",
+            "VBOX_GUI_USE_QGL = 1",
+            "PATH_SDK_QT6 = $qtDir",
+            "PATH_TOOL_QT6 = $qtDir",
+            "PATH_TOOL_QT6_BIN = $qtDir/bin",
+            "VBOX_PATH_QT = $qtDir",
+            "VBOX_WITH_HARDENING = ",
+            "VBOX_WITH_WARNINGS_AS_ERRORS = ",
+            "VBOX_WITH_TESTCASES = ",
+            "VBOX_WITH_VALIDATIONKIT = ",
+            "# --- Guest Additions ---",
+            "VBOX_WITHOUT_ADDITIONS = ",
+            "VBOX_WITH_ADDITIONS_PACKING = 1",
+            "# --- Ghim Windows SDK 10.0.19041 (WDK cung cap header+lib KM cho version nay) ---",
+            "SDK_WINSDK10_VERSION = $env:KIT_VERSION",
+            "# --- Thay bo bo DDK 7.1 (WINDDK71*) bang bo lib cua WDK 10 ---",
+            "#     -WLH: WDK 10 khong co lib Vista -> dung bo lib Win7 (kBuild WINSDK10-KM-WLH)",
+            "#     -W2K3/-WXP/-NT4: cung dung bo lib Win7",
+            "VBOX_WINDDK_GST_WLH = WINSDK10-KM-WLH",
+            "VBOX_WINDDK_GST_W2K3 = WINSDK10-KM-W7",
+            "VBOX_WINDDK_GST_WXP = WINSDK10-KM-W7",
+            "VBOX_WINDDK_GST_NT4 = WINSDK10-KM-W7"
+          );
+          Set-Content -Path "LocalConfig.kmk" -Value $localCfg -Encoding utf8;
+
+          Write-Host "=== AutoConfig.kmk Content ===";
+          if (Test-Path "AutoConfig.kmk") { Get-Content "AutoConfig.kmk"; }
+          Write-Host "=== LocalConfig.kmk Content ===";
+          Get-Content "LocalConfig.kmk";
+
+      - name: Build VirtualBox with Guest Additions
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:PATH";
+
+          $kmk = "$env:KBUILD_PATH\bin\win.amd64\kmk.exe";
+          $jobs = [Environment]::ProcessorCount;
+          Write-Host "Build jobs: $jobs";
+
+          & $kmk "-j$jobs";
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "kmk build failed with exit code $LASTEXITCODE.";
+          }
+
+      - name: Verify Guest Additions artifacts
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          $add = "out\win.amd64\release\bin\additions";
+          $core = @("VBoxGuest.sys", "VBoxService.exe", "VBoxTray.exe", "VBoxControl.exe");
+          $extra = @("VBoxSF.sys", "VBoxMouse.sys", "VBoxVideo.sys", "VBoxWddm.sys", "VBoxCertUtil.exe");
+
+          $missingCore = @();
+          foreach ($f in $core + $extra) {
+            $p = Join-Path $add $f;
+            if (Test-Path $p) {
+              Write-Host ("  OK   {0,-24} {1,10:N0} bytes" -f $f, (Get-Item $p).Length);
+            }
+            else {
+              Write-Host ("  MISS {0}" -f $f) -ForegroundColor Yellow;
+              if ($core -contains $f) { $missingCore += $f };
+            }
+          }
+
+          $iso = "out\win.amd64\release\bin\VBoxGuestAdditions.iso";
+          if (Test-Path $iso) {
+            Write-Host ("  OK   {0,-24} {1,10:N0} bytes" -f "VBoxGuestAdditions.iso", (Get-Item $iso).Length);
+          }
+          else {
+            Write-Host "  MISS VBoxGuestAdditions.iso" -ForegroundColor Yellow;
+          }
+
+          if ($missingCore.Count -gt 0) {
+            throw "Missing core Guest Additions artifacts: $($missingCore -join ', ')"
+          }
+
+      - name: Upload Guest Additions artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtualbox-guest-additions
+          if-no-files-found: warn
+          path: |
+            out/win.amd64/release/bin/additions/
+            out/win.amd64/release/bin/VBoxGuestAdditions.iso
+
+      - name: Upload build diagnostics (additions)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtualbox-additions-build-diagnostics
+          if-no-files-found: warn
+          path: |
+            configure.log
+            AutoConfig.kmk
+            LocalConfig.kmk
+            env.bat
+            source-revision.txt
+            wdk-layout-info.txt
+            *.log
+            out/**/*.log
+
+  # ---------------------------------------------------------------------
   # Smoke test: chạy 1 VM headless và thu thập identity mà guest nhìn thấy.
   #
   # Mục tiêu:

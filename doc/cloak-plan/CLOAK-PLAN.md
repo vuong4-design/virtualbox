@@ -774,35 +774,97 @@ Yêu cầu: cần **một VM đã định nghĩa** trong CI. Có 2 lựa chọn:
 
 → **Khuyến nghị:** dùng **A** cho PR gating (nhanh, không cần image), **B** cho release/manual verification.
 
-#### 4.7.5 Bổ sung: job `full` cho Guest Additions (Phase 3)
+#### 4.7.5 Bổ sung: job `full-additions` (Guest Additions + WDK)
 
-Workflow hiện tại đặt `VBOX_WITHOUT_ADDITIONS = 1` → **không build driver GA**.
-→ **PR-2 (đổi tên Guest Additions) không thể verify bằng workflow hiện tại.**
+> **ĐÃ TRIỂN KHAI** — `.github/workflows/build.yml` (job `full-additions`) + `.github/scripts/install-wdk.ps1`
 
-Cần job riêng với WDK:
+Job `build` đặt `VBOX_WITHOUT_ADDITIONS=1` → **không** build driver GA → PR-2 (đổi tên GA) không verify được. Job mới build lại toàn bộ với GA bật.
 
-```yaml
-  full-additions:
-    runs-on: windows-2022
-    timeout-minutes: 180
-    env:
-      VBOX_WITHOUT_ADDITIONS: ""
-      VBOX_WITH_ADDITIONS_PACKING: ""
-    steps:
-      # ... checkout, msvc-dev-cmd, yasm, Qt, SDL (giống job build) ...
-      - name: Install WDK
-        shell: pwsh
-        run: |
-          choco install -y wdk --version=10.0.22621.0
-          # hoặc tải WDK redist + SDK từ Microsoft
-      - name: Configure + Build
-        run: |
-          cscript //nologo configure.vbs "--with-SDK10=$sdk" "--with-libSDL=$env:VBOX_SDL_PATH" "--with-Qt=$qtDir"
-          # LocalConfig.kmk KHÔNG đặt VBOX_WITHOUT_ADDITIONS
-          & $kmk "-j$jobs"
+#### 4.7.5.1 Phát hiện quan trọng: DDK 7.1 vs WDK 10
+
+`Config.kmk:2157-2199` quyết định bộ SDK cho driver GA:
+
+| Biến | Giá trị mặc định (x86/amd64) | Cần gì |
+|---|---|---|
+| `VBOX_WINDDK_GST` | `WINSDK10-KM` | `Lib\<ver>\km\{x64,x86}` |
+| `VBOX_WINDDK_GST_W7` | `WINSDK10-KM-W7` | `Lib\win7\km\{x64,x86}` |
+| `VBOX_WINDDK_GST_W8` | `WINSDK10-KM-W8` | `Lib\win8\km\{x64,arm32}` |
+| `VBOX_WINDDK_GST_WLH` | **`WINDDK71WLH`** | ❌ **DDK 7.1** (Vista) — dùng cho `VBoxSF.sys`, `VBoxDisp*` |
+| `VBOX_WINDDK_GST_W2K3` | **`WINDDK71WNET`** | ❌ **DDK 7.1** — `VBoxSFW2K.sys` |
+| `VBOX_WINDDK_GST_WXP` | **`WINDDK71WXP`** | ❌ **DDK 7.1** — `VBoxMRXNP.dll` |
+| `VBOX_WINDDK_GST_NT4` | → `WXP` | ❌ **DDK 7.1** — `VBoxGuest.sys` (x86), `VBoxMouseNT.sys`, `VBoxVideo.sys` (xpdm) |
+
+**DDK 7.1 (`7600.16385.1`) KHÔNG có trong git mirror** — nó chỉ nằm trong bản source drop chính thức của Oracle (`tools/win.x86/ddk/7600.16385.1`, xem `configure.vbs:1125`). Đây là lý do workflow gốc phải patch bỏ check `CheckForWinDDK` (`configure.vbs:1169-1172` → `MsgError` → configure trả exit code khác 0).
+
+**Giải pháp:** thay bộ DDK 7.1 bằng bộ lib của WDK 10 qua `LocalConfig.kmk`:
+
+```
+VBOX_WINDDK_GST_WLH  = WINSDK10-KM-WLH    # kBuild: dùng lib Win7 thay lib Vista
+VBOX_WINDDK_GST_W2K3 = WINSDK10-KM-W7
+VBOX_WINDDK_GST_WXP  = WINSDK10-KM-W7
+VBOX_WINDDK_GST_NT4  = WINSDK10-KM-W7
+SDK_WINSDK10_VERSION = 10.0.19041.0      # header KM phai cung version voi WDK
 ```
 
-Rủi ro: cài WDK trên runner là điểm dễ vỡ nhất (version pin, licensing, `WDK_*` env var). Có thể cần **self-hosted runner** nếu runner công cộng không ổn định.
+`WINSDK10-KM-WLH` **đã có sẵn trong kBuild** (`kBuild/kBuild/sdks/WINSDK10-KM-WLH.kmk`) với comment: *"There are no Vista libraries shipping with the windows 10 WDK, so this is a bit hackish and uses the Windows 7 ones instead."*
+
+#### 4.7.5.2 Chọn version WDK
+
+Từ tài liệu Microsoft (`other-wdk-downloads` + blog *Building Drivers for Previous OS Releases Using the Latest WDK*):
+
+| WDK | Có lib KM x86? | Có lib win7/win8? | Kết luận |
+|---|---|---|---|
+| 10.0.19041.5738 | ✅ (19041 < 22000) | ✅ | **Duy nhất thỏa cả hai** |
+| 10.0.22621.x | ✅ | ❌ | Thiếu win7/win8 |
+| 10.0.26100+ | ❌ | ❌ | Thiếu cả hai |
+
+→ Job ghim **SDK + WDK 10.0.19041.0**.
+
+Link tải (đã verify truy cập được):
+- SDK: `https://go.microsoft.com/fwlink/?linkid=2311805` → `winsdksetup.exe`
+- WDK: `https://go.microsoft.com/fwlink/?linkid=2342425` → `wdksetup.exe`
+
+#### 4.7.5.3 Script `install-wdk.ps1`
+
+`.github/scripts/install-wdk.ps1` — mỗi kit thử 2 cách:
+
+1. **Cài trực tiếp** (silent) với feature id:
+   - SDK: `/features OptionId.WindowsDesktopSDK-10.0.19041.0 OptionId.DesktopCPPx64 /q /ceip off`
+   - WDK: `/features OptionId.WindowsDriverKitComplete /q /ceip off`
+2. **Fallback layout**: `wdksetup.exe /layout <dir> /quiet` → chạy `layout.exe /quiet` (tránh phải đoán feature id của WDK, vốn đổi theo version).
+
+Sau đó **verify** 6 thư mục bắt buộc và fail với thông báo chỉ rõ nguyên nhân:
+
+```
+Include\10.0.19041.0\km        Include\10.0.19041.0\um
+Lib\10.0.19041.0\km\x64        Lib\10.0.19041.0\km\x86
+Lib\win7\km\x64                Lib\win8\km\x64
+```
+
+#### 4.7.5.4 Nội dung job
+
+| Step | Nội dung |
+|---|---|
+| Checkout | `repository: ${{ github.repository }}` (giống job `build`) |
+| Record source revision | Ghi repo/ref/sha vào `source-revision.txt` |
+| MSVC | `ilammy/msvc-dev-cmd@v1` |
+| Verify kBuild + SDK | Kiểm tra `kmk.exe` + `Windows Kits\10\Include` |
+| Patch DDK check | Bỏ `CheckForWinDDK` trong `configure.vbs` (vẫn cần — không có DDK 7.1) |
+| **Install WDK** | `install-wdk.ps1 -KitVersion 10.0.19041.0` |
+| Yasm / Qt 6 / SDL | Giống job `build` |
+| Configure | `configure.vbs --with-SDK10 --with-libSDL --with-Qt` + `LocalConfig.kmk` (GA bật + override DDK) |
+| Build | `kmk -j$(ProcessorCount)` |
+| **Verify GA artifacts** | Check `VBoxGuest.sys`, `VBoxService.exe`, `VBoxTray.exe`, `VBoxControl.exe` (bắt buộc) + `VBoxSF.sys`, `VBoxMouse.sys`, `VBoxVideo.sys`, `VBoxWddm.sys`, `VBoxCertUtil.exe` (báo cáo) + `VBoxGuestAdditions.iso` |
+| Upload | Artifact `virtualbox-guest-additions` + `virtualbox-additions-build-diagnostics` |
+
+#### 4.7.5.5 Giới hạn đã biết
+
+| Hạn chế | Hệ quả |
+|---|---|
+| Không có DDK 7.1 | Dùng lib Win7 thay cho Vista/XP. Driver x86 (`VBoxGuest` x86, `VBoxMouseNT`, `VBoxVideo` xpdm) có thể không link được vì thiếu `exsup.lib` (lib thời XP) |
+| `VBOX_WINDDK_GST_NT4` → `WINSDK10-KM-W7` | `VBoxGuest.sys` x86 + `VBoxVideo.sys` (xpdm) + `VBoxMouseNT.sys` có thể fail link → có thể phải bỏ `VBOX_WITH_ADDITIONS_ISO.win.x86` |
+| WDK 19041 không còn trên VS 2022 mới nhất | Đã xử lý bằng layout fallback; nếu Microsoft gỡ hẳn feature id thì job sẽ fail với thông báo rõ |
+| Job build lại toàn bộ (~2-4h) | Chấp nhận được ở giai đoạn hiện tại; có thể tối ưu bằng `paths` filter khi PR-2 hoàn tất |
 
 #### 4.7.6 Mapping PR → job
 
@@ -824,7 +886,7 @@ Rủi ro: cài WDK trên runner là điểm dễ vỡ nhất (version pin, licen
 | 0.3.5 | Ghi `source-revision.txt` (repo/ref/sha) vào artifact | `.github/workflows/build.yml` | ✅ **đã làm** | Artifact diagnostics chứa `source-revision.txt` |
 | 0.3.6 | `concurrency` để huỷ run cũ | `.github/workflows/build.yml:19-22` | ✅ **đã làm** | Push liên tiếp chỉ giữ run mới |
 | 0.4.1 | Thêm job `smoke` (3 kịch bản: ICH9+BIOS, PIIX3+BIOS, ICH9+EFI) | `.github/workflows/build.yml` + `.github/scripts/collect-identity.ps1` | ✅ **đã làm** | Artifact `cloak-identity-report` + `stability.txt` |
-| 0.4.2 | Thêm job `full-additions` + WDK | — | ⬜ chưa làm | Build được `VBoxGuest.sys` (cần cho PR-2) |
+| 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
 | 0.4.3 | Job `smoke` với VM thật (có disk) | — | ⬜ chưa làm | Verify được DMI/ACPI **trong guest** |
 
 **Về script `collect-identity.ps1`** (`.github/scripts/collect-identity.ps1`):
@@ -875,7 +937,7 @@ Rủi ro: cài WDK trên runner là điểm dễ vỡ nhất (version pin, licen
 | 0.2 | Chứng minh build Windows **cục bộ** chạy được | `configure.vbs` → `env.bat` + `AutoConfig.kmk` | Build sạch không lỗi |
 | 0.3 | **Sửa workflow CI** (checkout + trigger + revision log) | `.github/workflows/build.yml` | ✅ **đã làm** — xem [§4.7.7](#477-danh-sách-task-ci-cụ-thể-phase-0) |
 | 0.4 | Thêm job `smoke` (verify identity + ổn định) | `.github/workflows/build.yml`, `.github/scripts/collect-identity.ps1` | ✅ **đã làm** (3 kịch bản) |
-| 0.4b | Thêm job `full-additions` + WDK (cho PR-2) | `.github/workflows/build.yml` | ⬜ chưa làm |
+| 0.4b | Thêm job `full-additions` + WDK | `.github/workflows/build.yml`, `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
 | 0.5 | Rewrite path pcbios ↔ efi trong CFGM overlay | `ConsoleImplConfigCommon.cpp:724-843` | Set `VBoxInternal/Devices/pcbios/0/Config/DmiBIOSVendor` → guest thấy ở cả BIOS và EFI mode |
 | 0.6 | Hạ tầng test: script so sánh guest-visible identity giữa 2 build | `.github/scripts/collect-identity.ps1` ✅ (phần CI) | Chạy được trên VM Windows + Linux |
 | 0.7 | Baseline identity để so sánh (artifact từ build stock) | artifact `cloak-identity-report` | Có 1 bộ giá trị reference cho VM mẫu |
@@ -1267,6 +1329,7 @@ Tóm tắt:
 [x] Chốt 4 quyết định thiết kế    → mục 10
 [x] Phase 0.3 — sửa workflow CI    → .github/workflows/build.yml
 [x] Phase 0.4 — job smoke + script → .github/scripts/collect-identity.ps1
+[x] Phase 0.4b — job full-additions → .github/scripts/install-wdk.ps1
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -1275,23 +1338,25 @@ Tóm tắt:
 | Hạng mục | Trạng thái |
 |---|---|
 | Mã nguồn VirtualBox (`src/`) | **Chưa sửa gì** |
-| `.github/workflows/build.yml` | Đã sửa: checkout đúng repo, trigger mới, `source-revision.txt`, `concurrency`, job `smoke` |
-| `.github/scripts/collect-identity.ps1` | Mới — thu thập + kiểm tra ổn định identity |
+| `.github/workflows/build.yml` | 3 job: `build` (core), `full-additions` (GA + WDK), `smoke` (verify identity) |
+| `.github/scripts/collect-identity.ps1` | Thu thập + kiểm tra ổn định identity (3 kịch bản) |
+| `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
 | `.gitignore` | Vẫn còn thay đổi chưa commit (`+cloak`) |
 | Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` |
 
 Khi nhận chỉ thị "triển khai", thứ tự đề xuất:
 
 1. Phase 0.1-0.2 (branch + build local) — *chưa làm*
-2. Phase 0.4b (job `full-additions` + WDK) — chỉ cần trước PR-2
-3. Phase 0.5 (rewrite path pcbios ↔ efi)
-4. Phase 1.0 (MPE) — nền cho mọi thứ sau
-5. Phase 1 (Tier 1) → Phase 2 (Tier 2) → PR-1
-6. Phase 3 → PR-2
-7. Phase 4 → PR-3
-8. Phase 5 → PR-4
+2. Phase 0.5 (rewrite path pcbios ↔ efi)
+3. Phase 1.0 (MPE) — nền cho mọi thứ sau
+4. Phase 1 (Tier 1) → Phase 2 (Tier 2) → PR-1
+5. Phase 3 → PR-2
+6. Phase 4 → PR-3
+7. Phase 5 → PR-4
 
-**Bước kiểm chứng đầu tiên sau khi có code:** push branch `feature/cloak` → workflow chạy → job `smoke` phải xanh → artifact `cloak-identity-report` cho thấy identity đã đổi so với baseline nhưng **ổn định giữa 2 lần chạy**.
+**Bước kiểm chứng đầu tiên sau khi có code:** push branch `feature/cloak` → workflow chạy →
+- job `build` xanh → job `smoke` xanh → artifact `cloak-identity-report` cho thấy identity **đã đổi** so với baseline nhưng **ổn định giữa 2 lần chạy**.
+- job `full-additions` xanh → artifact `virtualbox-guest-additions` có `VBoxGuest.sys` + `VBoxGuestAdditions.iso`.
 
 ---
 
