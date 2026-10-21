@@ -498,24 +498,14 @@ jobs:
           [System.IO.File]::WriteAllLines($file, $lines, [System.Text.UTF8Encoding]::new($false));
           Write-Host "Patched line $($idx + 1).";
 
-      - name: Cache WDK layout
-        uses: actions/cache@v4
-        with:
-          path: .wdk-layout
-          key: wdk-layout-10.0.19041.0
-          restore-keys: |
-            wdk-layout-
-
       - name: Install Windows SDK 10.0.19041 + WDK
-        # Gioi han thoi gian: installer WDK tai ~2-3 GB, co the bi treo.
-        timeout-minutes: 60
+        # Gioi han thoi gian phong trường hợp installer treo.
+        timeout-minutes: 45
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop";
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
-          & ".\.github\scripts\install-wdk.ps1" `
-            -KitVersion $env:KIT_VERSION `
-            -LayoutDir "${{ github.workspace }}\.wdk-layout";
+          & ".\.github\scripts\install-wdk.ps1" -KitVersion $env:KIT_VERSION;
           if ($LASTEXITCODE -ne 0) {
             throw "install-wdk.ps1 failed with exit code $LASTEXITCODE";
           }
@@ -525,6 +515,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Continue";
+          Write-Host "=== downloaded MSI ===";
+          Get-ChildItem (Join-Path $env:RUNNER_TEMP 'wdk-msi') -ErrorAction SilentlyContinue |
+            Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 |
+            Tee-Object -FilePath 'wdk-msi-downloaded.txt';
           Write-Host "=== WDK burn logs ===";
           $logs = @();
           foreach ($dir in @($env:TEMP, (Join-Path $env:TEMP 'wdk'))) {
@@ -537,13 +531,6 @@ jobs:
             Write-Host "--- $($l.FullName) ---";
             Get-Content $l.FullName -Tail 120 -ErrorAction SilentlyContinue;
             Copy-Item $l.FullName "wdk-burn-$($l.Name)" -Force -ErrorAction SilentlyContinue;
-          }
-          Write-Host "=== layout dir ===";
-          $layout = Join-Path $env:RUNNER_TEMP 'wdk-layout';
-          if (Test-Path $layout) {
-            Get-ChildItem $layout -Recurse -File -ErrorAction SilentlyContinue |
-              Select-Object -First 80 FullName, Length | Format-Table -AutoSize | Out-String -Width 200 |
-              Tee-Object -FilePath 'wdk-layout-listing.txt';
           }
           Write-Host "=== kits tree ===";
           $kits = "${env:ProgramFiles(x86)}\Windows Kits\10";
@@ -764,9 +751,8 @@ jobs:
             source-revision.txt
             wdk-layout-info.txt
             wdk-kit-tree.txt
-            wdk-msi-inventory.txt
+            wdk-msi-downloaded.txt
             wdk-burn-*.log
-            wdk-layout-listing.txt
             wdk-kits-tree.txt
             *.log
             out/**/*.log

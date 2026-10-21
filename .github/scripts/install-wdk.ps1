@@ -37,7 +37,6 @@ param(
     [string] $SdkUrl     = 'https://go.microsoft.com/fwlink/?linkid=2311805',
     [string] $WdkUrl     = 'https://go.microsoft.com/fwlink/?linkid=2342425',
     [string] $KitsRoot  = "${env:ProgramFiles(x86)}\Windows Kits\10",
-    [string] $LayoutDir = '',
     [switch] $SkipSdk,
     [switch] $SkipWdk
 )
@@ -45,6 +44,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+# URL thu muc payload cua WDK 10.0.19041.5738 (lay tu Burn manifest cua
+# wdksetup.exe: <Payload ... FilePath="Installers\<ten file>" />).
+# DOI GUID doi doi doi -> phai doi doi doi khi doi doi doi WDK khac.
+$script:WdkBaseUrl = 'https://download.microsoft.com/download/1b122713-4a55-4a95-8848-279de832a4c9/wdk/'
 
 function Write-Step {
     param([string] $Message)
@@ -161,17 +165,24 @@ if (-not $SkipSdk) {
 # ---------------------------------------------------------------------------
 # 2. Windows Driver Kit
 #
-# VAN DE: runner windows-2022 da co san WDK 10.0.26100.7705.  Khi chay bundle
-# WDK 19041, Burn detect cac package cua no la "Obsolete" (vi da co version
-# moi hon) -> chuyen sang luong Modify/Repair -> hien UI
+# VAN DE GOC: runner windows-2022 da co san WDK 10.0.26100.7705.  Khi chay bundle
+# WDK 19041 (ke ca /layout), Burn detect cac package cua no la "Obsolete" ->
+# chuyen sang luong Modify/Repair -> hien UI
 # "Microsoft.Bootstrapper.Presentation.LocationPage" va CHO MAI, du da co /q.
-# (Da xac nhan trong Burn log cua run 39608128701.)
+# (Da xac nhan trong Burn log cua run 39608128701 va 39623216928.)
 #
-# GIAI PHAI: BO QUA hoan toan apply phase cua Burn:
-#   1. wdksetup.exe /layout  -> chi TAI payload (WixBundleAction=2, khong UI)
-#   2. msiexec /i truc tiep cho tung MSI can thiet
-# Cach nay cung loai bo van de "Another instance of kit installer is already
-# running" do bundle bi kill nua de giu global mutex.
+# GIAI PHAI: BO QUA Burn hoan toan.
+#   MSI cua WDK 19041 khong self-contained: noi dung (headers + .lib) nam trong
+#   cac file CAB payload cung thu muc.  Danh sach lay tu Burn manifest cua
+#   wdksetup.exe (PE section .wixburn -> UX container la file CAB), muc
+#   <Payload ... FilePath="Installers\<ten file>"> cho tung <MsiPackage Id=...>.
+#   Da test local: tai MSI + 3 CAB roi `msiexec /a` -> exit 0, ra dung
+#   Windows Kits\10\Lib\win7\km\{x64,x86}\ntoskrnl.lib
+#
+#   -> Tai truc tiep MSI + CAB tu CDN Microsoft, roi msiexec /i tung nhom.
+#   -> Tong tai ~77 MB. Khong Burn, khong layout, khong Modify UI.
+#
+# Danh sach payload: .github/scripts/wdk-payloads.txt
 # ---------------------------------------------------------------------------
 $wdkOk = $true
 if (-not $SkipWdk) {
@@ -182,90 +193,61 @@ if (-not $SkipWdk) {
     }
     Start-Sleep -Seconds 3
 
-    $wdkExe = Join-Path $env:RUNNER_TEMP 'wdksetup.exe'
-    Write-Step "Downloading WDK bootstrapper ($WdkUrl)"
-    Invoke-WebRequest -Uri $WdkUrl -OutFile $wdkExe -UseBasicParsing
-
-    $layoutDir = if ($LayoutDir) { $LayoutDir } else { Join-Path $env:RUNNER_TEMP 'wdk-layout' }
-    # Luon ep thanh mang: Get-ChildItem tra $null khi khong tim thay gi,
-    # va $null.Count se loi duoi Set-StrictMode.
-    $existing = @(Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue)
-    if ($existing.Count -gt 0) {
-        Write-Step "Layout da co san ($($existing.Count) MSI) - bo qua tai lai"
-    }
-    else {
-        if (Test-Path $layoutDir) { Remove-Item $layoutDir -Recurse -Force -ErrorAction SilentlyContinue }
-        $null = New-Item -ItemType Directory -Force -Path $layoutDir
-
-        Write-Step "Downloading WDK layout to $layoutDir (chi tai, khong apply)"
-        $rc = Invoke-Bootstrapper -Exe $wdkExe -ArgumentList @('/layout', $layoutDir, '/quiet', '/ceip', 'off') -TimeoutSeconds 2400
-        Save-BurnLog
+    $manifest = Join-Path $PSScriptRoot 'wdk-payloads.txt'
+    if (-not (Test-Path -LiteralPath $manifest)) {
+        throw "Missing payload manifest: $manifest"
     }
 
-    $msis = @(Get-ChildItem -Path $layoutDir -Filter '*.msi' -Recurse -ErrorAction SilentlyContinue)
-    Write-Step "Layout contains $($msis.Count) MSI package(s)"
+    $msiDir = Join-Path $env:RUNNER_TEMP 'wdk-msi'
+    if (Test-Path $msiDir) { Remove-Item $msiDir -Recurse -Force -ErrorAction SilentlyContinue }
+    $null = New-Item -ItemType Directory -Force -Path $msiDir
 
-    # Doc ProductName cua tung MSI de chon dung (khong doan ten file).
-    $installer = $null
-    try { $installer = New-Object -ComObject WindowsInstaller.Installer } catch { }
+    # Parse: "[<ten MSI>]" roi cac dong duong dan file.
+    $groups = [System.Collections.Generic.List[object]]::new()
+    $cur = $null
+    foreach ($line in Get-Content -LiteralPath $manifest) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        if ($t.StartsWith('[') -and $t.EndsWith(']')) {
+            $cur = [ordered]@{ Msi = $t.Substring(1, $t.Length - 2); Files = [System.Collections.Generic.List[string]]::new() }
+            $groups.Add($cur)
+        }
+        elseif ($cur) {
+            $cur.Files.Add($t)
+        }
+    }
+    Write-Step "Payload manifest: $($groups.Count) package group(s)"
 
-    $inventory = [System.Collections.Generic.List[string]]::new()
-    $byName = @{}
-    foreach ($msi in $msis) {
-        $productName = ''
-        if ($installer) {
+    foreach ($g in $groups) {
+        Write-Step "Package: $($g.Msi)"
+        foreach ($rel in $g.Files) {
+            $name = Split-Path $rel -Leaf
+            $out = Join-Path $msiDir $name
+            if (Test-Path -LiteralPath $out) { continue }
+            # Escape tung segment path: EscapeDataString se encode ca '/' thanh
+            # %2F -> server download.microsoft.com tra 404.
+            $encoded = ($rel.Split('/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+            $url = $script:WdkBaseUrl + $encoded
             try {
-                $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi.FullName, 0))
-                # Chuoi MSI SQL phai dung backtick quanh reserved word -> dung
-                # single-quoted string de giu nguyen backtick (double-quoted se
-                # bi PowerShell bien thanh escape).
-                $query = 'SELECT `Value` FROM `Property` WHERE `Property`=''ProductName'''
-                $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($query))
-                $null = $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
-                $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
-                if ($rec) {
-                    $productName = $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, 1)
-                }
+                Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 600
             }
-            catch { }
+            catch {
+                Write-Host "    download failed: $rel -> $($_.Exception.Message)" -ForegroundColor Red
+                continue
+            }
         }
-        if (-not $productName) { $productName = $msi.BaseName }
-        $inventory.Add("$($msi.Name)`t$productName")
-        $byName[$productName] = $msi.FullName
-    }
-    $inventory | Set-Content -Path 'wdk-msi-inventory.txt' -Encoding utf8
-    Write-Note 'MSI inventory written to wdk-msi-inventory.txt'
 
-    # Cac MSI can thiet cho VirtualBox.
-    $wanted = @(
-        'Windows Driver Kit Headers and Libraries',
-        'Windows 7 WDK Headers and Libraries',
-        'Windows 8 WDK Headers and Libraries',
-        'Windows 8.1 WDK Headers and Libraries',
-        'Windows Driver Kit',
-        'Windows Driver Framework Headers and Libraries'
-    )
-
-    $selected = [System.Collections.Generic.List[string]]::new()
-    foreach ($w in $wanted) {
-        if ($byName.ContainsKey($w)) {
-            $selected.Add($byName[$w])
-            Write-Note "selected: $w"
+        $msiPath = Join-Path $msiDir $g.Msi
+        if (-not (Test-Path -LiteralPath $msiPath)) {
+            Write-Host "    MSI missing: $($g.Msi) - skip" -ForegroundColor Yellow
+            continue
         }
-    }
-    if ($selected.Count -eq 0) {
-        Write-Host '    khong khop ten MSI nao -> cai tat ca (tru bo Debugging)' -ForegroundColor Yellow
-        foreach ($msi in $msis) {
-            if ($msi.Name -notmatch 'Debugg') { $selected.Add($msi.FullName) }
-        }
-    }
 
-    foreach ($path in $selected) {
-        Write-Step "Installing $(Split-Path $path -Leaf)"
+        Write-Step "Installing $($g.Msi)"
         $rc2 = Invoke-Bootstrapper -Exe 'msiexec.exe' `
-            -Arguments @('/i', "`"$path`"", '/qn', '/norestart') -TimeoutSeconds 900
+            -Arguments @('/i', "`"$msiPath`"", '/qn', '/norestart') -TimeoutSeconds 900
         if ($rc2 -ne 0 -and $rc2 -ne 3010) {
-            Write-Host "    msiexec failed ($rc2) for $(Split-Path $path -Leaf)" -ForegroundColor Yellow
+            Write-Host "    msiexec returned $rc2 for $($g.Msi)" -ForegroundColor Yellow
         }
     }
 

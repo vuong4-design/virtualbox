@@ -1,0 +1,61 @@
+# WDK 10.0.19041.5738 - danh sach payload can tai truc tiep tu CDN Microsoft.
+#
+# Nguon: Burn manifest cua wdksetup.exe (PE section .wixburn -> UX container la file CAB),
+#        muc <Payload ... FilePath=...> cho tung <MsiPackage Id=...>.
+#
+# Cach dung:
+#   1) tai moi file trong nhom vao MOT thu muc
+#   2) msiexec /i <MSI> /qn  (MSI tim CAB payload cung thu muc)
+#
+# Khong can bundle wdksetup.exe: tren runner da co WDK 26100 nen bundle 19041
+# roi vao luong Modify/Repair va treo UI (da xac nhan trong Burn log).
+
+[Windows Driver Kit Headers and Libs-x86_en-us.msi]
+Installers/Windows Driver Kit Headers and Libs-x86_en-us.msi
+Installers/71462b3b74a2af35eaa5998e47f2b93e.cab
+Installers/32a9c44b2398a6ce348c28bf79f74f37.cab
+Installers/f9d682da613d039324a9634a15be9d7a.cab
+Installers/b4e095b0db159e6fe323e8f8fad34cb9.cab
+Installers/b29326d5ced13700a41e5db8f53330b5.cab
+Installers/0b7dc412a6a7e567bae26dee009adb96.cab
+Installers/e95451ee2822f7a7fe6ef821ba61f28f.cab
+Installers/194dbe48c1d24e5f89253c50354b2e4e.cab
+Installers/8fb4374751539ea84ffd85f2c22665b5.cab
+Installers/4bad5fd6dd945ea8c2210c749cd155c0.cab
+
+[Windows 7 WDK Headers and Libs-x86_en-us.msi]
+Installers/Windows 7 WDK Headers and Libs-x86_en-us.msi
+Installers/b8805bec8f9c9005d982d0c9eb391b56.cab
+Installers/dcbcee8cf7426c70fe34947f02a5e2b9.cab
+Installers/655d2ea3e6730e0fb6db4507a52a03a7.cab
+
+[Windows 8 WDK Headers and Libs-x86_en-us.msi]
+Installers/Windows 8 WDK Headers and Libs-x86_en-us.msi
+Installers/6aa2a55cf04de52694e3618322ba160a.cab
+Installers/bcc25ae425aafb5939e85cc91701bc6e.cab
+Installers/e1155a3c9fbc60866bc2ade3d96ba1e2.cab
+Installers/fb0f90c85b5d30f55a48bc28ca91ae35.cab
+
+[Windows 8.1 WDK Headers and Libs-x86_en-us.msi]
+Installers/Windows 8.1 WDK Headers and Libs-x86_en-us.msi
+Installers/9af7b7cfa707be6cd5f0a1973a05fea4.cab
+Installers/0fad75839dfec597bf285a9b31cfce99.cab
+Installers/38a0fc832aafbd2a6c116d12aca6a441.cab
+Installers/721264b0846c38dbfa3e62fc42cc1cd0.cab
+
+[Windows Driver Kit Binaries-x86_en-us.msi]
+Installers/Windows Driver Kit Binaries-x86_en-us.msi
+Installers/457eb18985e7490379970f23b54f2f35.cab
+Installers/47402a239b1a1dbb3cd279f300bda574.cab
+Installers/7a542e4e4df6cc25dcfc60d65e5d0324.cab
+Installers/28365a2ba9c106cd2321f13bbe89ed07.cab
+Installers/ac114523c6ad31621d6822c038c48a4b.cab
+Installers/62435a2ced17637eb680b6591fda1b84.cab
+
+[Windows Driver Framework Headers and Libs-x86_en-us.msi]
+Installers/Windows Driver Framework Headers and Libs-x86_en-us.msi
+Installers/3ce55adfa0b6876d81201bf8bfc22de5.cab
+Installers/70cb709a75682a70f678a2bf60cf10ce.cab
+Installers/37adab5deec3e494181513d584507037.cab
+
+# Tong khoang ta: 77.2 MB

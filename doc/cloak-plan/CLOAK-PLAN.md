@@ -1084,13 +1084,85 @@ của action. Chưa có bằng chứng là vấn đề (không có diagnostic n�
 → **Fix `VBOX_SVN_REV` đã được xác nhận hoạt động**: job `build` build thành công toàn bộ
 VirtualBox (core + GUI Qt6 + driver deps). Đây là nền tảng cần thiết.
 
-##### Trạng thái run `39608128701`
+##### Lỗi J — run `39623216928`: kể cả `/layout` cũng treo (Modify UI)
 
-| Job | Kết quả | Ghi chú |
-|---|---|---|
-| `build` | ✅ success (30 phút) | Build VirtualBox đầy đủ |
-| `smoke` | ✅ **success** | Thiết kế lại chạy được (xem Lỗi F) |
-| `full-additions` | ❌ fail ở bước WDK | Đã sửa (Lỗi G) |
+```
+==> Downloading WDK layout to D:\a\virtualbox\virtualbox\.wdk-layout (chi tai, khong apply)
+    TIMEOUT after 2400 s - killing D:\a\_temp\wdksetup.exe
+==> Layout contains 0 MSI package(s)
+```
+
+Burn log của lần này **giống hệt** lần trước:
+
+```
+i101: Detected package: package_WindowsDriverKit_x86_en_us, state: Obsolete
+...
+i000: Navigated to Microsoft.Bootstrapper.Presentation.LocationPage
+i199: Detect complete, result: 0x0
+```
+
+→ **Burn luôn chạy Detect**, kể cả trong `/layout`; khi phát hiện version mới hơn đã cài thì plan thành
+*Modify* → dùng **presentation BA** (có UI) → treo. **Layout của bundle này không dùng được trên
+runner đã có WDK mới hơn.**
+
+##### Lỗi K — giải pháp cuối: bỏ Burn hoàn toàn, tải MSI + CAB payload trực tiếp
+
+**Phát hiện then chốt:** MSI của WDK **không self-contained** — nội dung nằm trong các file CAB
+payload cùng thư mục. Test cục bộ (administrative install, **không** sửa hệ thống):
+
+```
+==> tải: Windows 7 WDK Headers and Libs-x86_en-us.msi (483 KB)
+          b8805bec8f9c9005d982d0c9eb391b56.cab (16 KB)
+          dcbcee8cf7426c70fe34947f02a5e2b9.cab (9.2 MB)
+          655d2ea3e6730e0fb6db4507a52a03a7.cab (5.8 MB)
+==> msiexec /a  ->  exit 0, extracted 166 files / 56.9 MB
+    FOUND: Windows Kits\10\Lib\win7\km\x64\ntoskrnl.lib
+    FOUND: Windows Kits\10\Lib\win7\km\x86\ntoskrnl.lib
+```
+
+(File `655d2ea3….cab` đúng là CAB mà Error 1311 đòi: *"Source file not found(cabinet)"*.)
+
+**Cách lấy danh sách payload:** trích **Burn manifest** của `wdksetup.exe` — nằm trong PE section
+`.wixburn`, UX container là file CAB, trong đó file `0` là manifest XML. Manifest cho `<Payload>`
+với `FilePath="Installers\<tên file>"` cho từng package, và mọi payload đều ở
+`https://download.microsoft.com/download/<GUID>/wdk/<FilePath>`.
+
+**Kết quả (đã kiểm tra HEAD 36/36 file → 0 lỗi):**
+
+| Package | Số payload | Dung lượng | Cài được |
+|---|---:|---:|---|
+| Windows Driver Kit Headers and Libs | 11 | 21.8 MB | `Include\10.0.19041.0\km`, `Lib\10.0.19041.0\km\{x64,x86}` |
+| Windows 7 WDK Headers and Libs | 4 | 14.7 MB | `Lib\win7\km\{x64,x86}` |
+| Windows 8 WDK Headers and Libs | 5 | 15.8 MB | `Lib\win8\km\*` |
+| Windows 8.1 WDK Headers and Libs | 5 | 17.0 MB | `Lib\winv6.3\km\*` |
+| Windows Driver Kit Binaries | 7 | 5.5 MB | tools |
+| Windows Driver Framework Headers and Libs | 4 | 5.4 MB | WDF headers |
+| **Tổng** | **36** | **~77 MB** | |
+
+**Cố tình BỎ** package `Windows Driver Kit` (126 payload, **316 MB** — gần như toàn bộ là debugger
++ WDTF + test framework): `Config.kmk:4246` cho thấy `VBOX_INF2CAT` tìm `Inf2Cat.exe` trong
+`$(PATH_SDK_WINSDK10_BIN)` — tức **Windows SDK** (đã có sẵn trên runner), không cần WDK.
+
+**Cài đặt cuối cùng trong script:**
+
+```
+1. kill mọi wdksetup/winsdksetup/msiexec còn sót (giải phóng global mutex)
+2. đọc .github/scripts/wdk-payloads.txt  (nhúng sẵn danh sách 36 file)
+3. tải MSI + CAB từ CDN vào MỘT thư mục
+4. msiexec /i <MSI> /qn /norestart cho từng nhóm
+5. verify 6 thư mục lib bắt buộc
+```
+
+**Một lỗi nhỏ đã sửa:** `[uri]::EscapeDataString($rel)` encode cả `/` thành `%2F` → CDN trả 404.
+Phải escape **từng segment** rồi join bằng `/`.
+
+##### Trạng thái run `39623216928`
+
+| Job | Kết quả |
+|---|---|
+| `build` | ✅ success |
+| `smoke` | ✅ success |
+| `full-additions` | ❌ fail ở bước WDK (Lỗi J → đã sửa bằng Lỗi K) |
 
 ##### Lỗi F — `smoke` fail: `VERR_VM_DRIVER_NOT_INSTALLED`
 
