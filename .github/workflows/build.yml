@@ -693,7 +693,6 @@ jobs:
             "PATH_SDK_WINSDK10_KM_LIB.amd64 = $sdkKmk/Lib/$env:KIT_VERSION/km/x64",
             "PATH_SDK_WINSDK10_KM_LIB.x86 = $sdkKmk/Lib/$env:KIT_VERSION/km/x86",
             "#     (chi anh huong SDK WINSDK10-UM-INCS cua driver, host van dung UM moi)",
-            "SDK_WINSDK10-KM_INCS = $sdkKmk/Include/$env:KIT_VERSION/km $sdkKmk/Include/$env:KIT_VERSION/shared",
             "SDK_WINSDK10-UM-INCS_INCS = $sdkKmk/Include/$env:KIT_VERSION/um $sdkKmk/Include/$env:KIT_VERSION/shared",
             "# --- Thay bo bo DDK 7.1 (WINDDK71*) bang bo lib cua WDK 10 ---",
             "#     -WLH: WDK 10 khong co lib Vista -> dung bo lib Win7 (kBuild WINSDK10-KM-WLH)",
