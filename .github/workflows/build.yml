@@ -670,6 +670,8 @@ jobs:
           Write-Host "Using VBOX_SVN_REV = $svnRev";
 
           # LocalConfig.kmk: build Guest Additions, va thay bo DDK 7.1 bang WDK 10.
+          $sdkShort = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($sdk).ShortPath;
+          $sdkKmk = $sdkShort -replace '\\', '/';
           $localCfg = @(
             "VBOX_WITH_QTGUI = 1",
             "VBOX_GUI_USE_QGL = 1",
@@ -685,8 +687,14 @@ jobs:
             "# --- Guest Additions ---",
             "VBOX_WITHOUT_ADDITIONS = ",
             "VBOX_WITH_ADDITIONS_PACKING = 1",
-            "# --- Ghim Windows SDK 10.0.19041 (WDK cung cap header+lib KM cho version nay) ---",
-            "SDK_WINSDK10_VERSION = $env:KIT_VERSION",
+            "# --- Chi dung WDK 10.0.19041 cho kernel-mode drivers, giu SDK moi cho host ---",
+            "#     (SDK 19041 thieu WinHv API moi -> VMMR3-x86/NEM khong compile duoc)",
+            "PATH_SDK_WINSDK10_KM_INC = $sdkKmk/Include/$env:KIT_VERSION/km",
+            "PATH_SDK_WINSDK10_KM_LIB.amd64 = $sdkKmk/Lib/$env:KIT_VERSION/km/x64",
+            "PATH_SDK_WINSDK10_KM_LIB.x86 = $sdkKmk/Lib/$env:KIT_VERSION/km/x86",
+            "#     (chi anh huong SDK WINSDK10-UM-INCS cua driver, host van dung UM moi)",
+            "SDK_WINSDK10-KM_INCS = $sdkKmk/Include/$env:KIT_VERSION/km $sdkKmk/Include/$env:KIT_VERSION/shared",
+            "SDK_WINSDK10-UM-INCS_INCS = $sdkKmk/Include/$env:KIT_VERSION/um $sdkKmk/Include/$env:KIT_VERSION/shared",
             "# --- Thay bo bo DDK 7.1 (WINDDK71*) bang bo lib cua WDK 10 ---",
             "#     -WLH: WDK 10 khong co lib Vista -> dung bo lib Win7 (kBuild WINSDK10-KM-WLH)",
             "#     -W2K3/-WXP/-NT4: cung dung bo lib Win7",
