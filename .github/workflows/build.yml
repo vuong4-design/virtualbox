@@ -670,8 +670,6 @@ jobs:
           Write-Host "Using VBOX_SVN_REV = $svnRev";
 
           # LocalConfig.kmk: build Guest Additions, va thay bo DDK 7.1 bang WDK 10.
-          $sdkShort = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($sdk).ShortPath;
-          $sdkKmk = $sdkShort -replace '\\', '/';
           $localCfg = @(
             "VBOX_WITH_QTGUI = 1",
             "VBOX_GUI_USE_QGL = 1",
@@ -687,22 +685,90 @@ jobs:
             "# --- Guest Additions ---",
             "VBOX_WITHOUT_ADDITIONS = ",
             "VBOX_WITH_ADDITIONS_PACKING = 1",
-            "# --- Chi dung WDK 10.0.19041 cho kernel-mode drivers, giu SDK moi cho host ---",
-            "#     (SDK 19041 thieu WinHv API moi -> VMMR3-x86/NEM khong compile duoc)",
-            "PATH_SDK_WINSDK10_KM_INC = $sdkKmk/Include/$env:KIT_VERSION/km",
-            "PATH_SDK_WINSDK10_KM_LIB.amd64 = $sdkKmk/Lib/$env:KIT_VERSION/km/x64",
-            "PATH_SDK_WINSDK10_KM_LIB.x86 = $sdkKmk/Lib/$env:KIT_VERSION/km/x86",
-            "#     (chi anh huong SDK WINSDK10-UM-INCS cua driver, host van dung UM moi)",
-            "SDK_WINSDK10-UM-INCS_INCS = $sdkKmk/Include/$env:KIT_VERSION/um $sdkKmk/Include/$env:KIT_VERSION/shared",
-            "# --- Thay bo bo DDK 7.1 (WINDDK71*) bang bo lib cua WDK 10 ---",
-            "#     -WLH: WDK 10 khong co lib Vista -> dung bo lib Win7 (kBuild WINSDK10-KM-WLH)",
-            "#     -W2K3/-WXP/-NT4: cung dung bo lib Win7",
-            "VBOX_WINDDK_GST_WLH = WINSDK10-KM-WLH",
-            "VBOX_WINDDK_GST_W2K3 = WINSDK10-KM-W7",
-            "VBOX_WINDDK_GST_WXP = WINSDK10-KM-W7",
-            "VBOX_WINDDK_GST_NT4 = WINSDK10-KM-W7"
+            "# --- Driver GA dung WDK $($env:KIT_VERSION) (KM headers + libs), host dung SDK 26100 ---",
+            "#     (26100 khong co lib KM x86/win7/win8; 19041 thieu XFG/WinHv cho host)",
+            "VBOX_WINDDK_GST = WINSDK10-KM-GST",
+            "VBOX_WINDDK_GST_W8 = WINSDK10-KM-W8-GST",
+            "VBOX_WINDDK_GST_W7 = WINSDK10-KM-W7-GST",
+            "VBOX_WINDDK_GST_WLH = WINSDK10-KM-WLH-GST",
+            "VBOX_WINDDK_GST_W2K3 = WINSDK10-KM-W7-GST",
+            "VBOX_WINDDK_GST_WXP = WINSDK10-KM-W7-GST",
+            "VBOX_WINDDK_GST_W2K = WINSDK10-KM-W7-GST",
+            "VBOX_WINDDK_GST_NT4 = WINSDK10-KM-W7-GST"
           );
           Set-Content -Path "LocalConfig.kmk" -Value $localCfg -Encoding utf8;
+
+          # --- kBuild SDK tuy chinh: driver GA dung WDK 19041 (headers + libs), ---
+          #     trong khi WINSDK10-KM (host) van dung SDK 26100 nhu job "build".
+          $sdkDir = "$env:KBUILD_PATH\sdks";
+          function Write-SdkFile([string]$fileName, [string]$contents) {
+            $contents = $contents.Replace('__KIT__', $env:KIT_VERSION);
+            Set-Content -Path "$sdkDir\$fileName" -Value $contents -Encoding ascii;
+          }
+
+          Write-SdkFile "WINSDK10-KM-GST.kmk" @'
+          ifndef SDK_WINSDK10
+           include $(KBUILD_PATH)/sdks/WINSDK10.kmk
+          endif
+
+          SDK_WINSDK10-KM-GST               := WDK __KIT__ kernel mode, Guest Additions drivers.
+          SDK_WINSDK10-KM-GST_EXTENDS       := WINSDK10-KM
+          SDK_WINSDK10-KM-GST_INCS          ?= $(PATH_SDK_WINSDK10_BASE_INC)/__KIT__/km $(PATH_SDK_WINSDK10_SHARED_INC)
+          SDK_WINSDK10-KM-GST_LIBPATH.x86   ?= $(PATH_SDK_WINSDK10_BASE_LIB)/__KIT__/km/x86
+          SDK_WINSDK10-KM-GST_LIBPATH.amd64 ?= $(PATH_SDK_WINSDK10_BASE_LIB)/__KIT__/km/x64
+
+          PATH_SDK_WINSDK10-KM-GST_LIB.x86   ?= $(SDK_WINSDK10-KM-GST_LIBPATH.x86)
+          PATH_SDK_WINSDK10-KM-GST_LIB.amd64 ?= $(SDK_WINSDK10-KM-GST_LIBPATH.amd64)
+          PATH_SDK_WINSDK10-KM-GST_LIB       ?= $(PATH_SDK_WINSDK10-KM-GST_LIB.$(KBUILD_TARGET_ARCH))
+          '@
+
+          Write-SdkFile "WINSDK10-KM-W8-GST.kmk" @'
+          ifndef SDK_WINSDK10
+           include $(KBUILD_PATH)/sdks/WINSDK10.kmk
+          endif
+
+          SDK_WINSDK10-KM-W8-GST               := WDK __KIT__ kernel mode, Windows 8 target, Guest Additions drivers.
+          SDK_WINSDK10-KM-W8-GST_EXTENDS       := WINSDK10-KM-GST
+          SDK_WINSDK10-KM-W8-GST_DEFS          ?= WIN32=100 _WIN32_WINNT=0x0602 WINVER=0x0602 _WIN32_IE=0x0A00 NTDDI_VERSION=0x06020000 KMDF_MAJOR_VERSION=01 KMDF_MINOR_VERSION=011
+          SDK_WINSDK10-KM-W8-GST_LIBPATH.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W8.x86)
+          SDK_WINSDK10-KM-W8-GST_LIBPATH.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W8.amd64)
+
+          PATH_SDK_WINSDK10-KM-W8-GST_LIB.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W8.x86)
+          PATH_SDK_WINSDK10-KM-W8-GST_LIB.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W8.amd64)
+          PATH_SDK_WINSDK10-KM-W8-GST_LIB       ?= $(PATH_SDK_WINSDK10-KM-W8-GST_LIB.$(KBUILD_TARGET_ARCH))
+          '@
+
+          Write-SdkFile "WINSDK10-KM-W7-GST.kmk" @'
+          ifndef SDK_WINSDK10
+           include $(KBUILD_PATH)/sdks/WINSDK10.kmk
+          endif
+
+          SDK_WINSDK10-KM-W7-GST               := WDK __KIT__ kernel mode, Windows 7 target, Guest Additions drivers.
+          SDK_WINSDK10-KM-W7-GST_EXTENDS       := WINSDK10-KM-GST
+          SDK_WINSDK10-KM-W7-GST_DEFS          ?= WIN32=100 _WIN32_WINNT=0x0601 WINVER=0x0601 _WIN32_IE=0x0800 NTDDI_VERSION=0x06010000 KMDF_MAJOR_VERSION=01 KMDF_MINOR_VERSION=007
+          SDK_WINSDK10-KM-W7-GST_LIBPATH.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.x86)
+          SDK_WINSDK10-KM-W7-GST_LIBPATH.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.amd64)
+
+          PATH_SDK_WINSDK10-KM-W7-GST_LIB.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.x86)
+          PATH_SDK_WINSDK10-KM-W7-GST_LIB.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.amd64)
+          PATH_SDK_WINSDK10-KM-W7-GST_LIB       ?= $(PATH_SDK_WINSDK10-KM-W7-GST_LIB.$(KBUILD_TARGET_ARCH))
+          '@
+
+          Write-SdkFile "WINSDK10-KM-WLH-GST.kmk" @'
+          ifndef SDK_WINSDK10
+           include $(KBUILD_PATH)/sdks/WINSDK10.kmk
+          endif
+
+          SDK_WINSDK10-KM-WLH-GST               := WDK __KIT__ kernel mode, Windows Vista target (W7 libs), Guest Additions drivers.
+          SDK_WINSDK10-KM-WLH-GST_EXTENDS       := WINSDK10-KM-GST
+          SDK_WINSDK10-KM-WLH-GST_DEFS          ?= WIN32=100 _WIN32_WINNT=0x0600 WINVER=0x0600 _WIN32_IE=0x0700 NTDDI_VERSION=0x06000000 KMDF_MAJOR_VERSION=01 KMDF_MINOR_VERSION=007
+          SDK_WINSDK10-KM-WLH-GST_LIBPATH.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.x86)
+          SDK_WINSDK10-KM-WLH-GST_LIBPATH.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.amd64)
+
+          PATH_SDK_WINSDK10-KM-WLH-GST_LIB.x86   ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.x86)
+          PATH_SDK_WINSDK10-KM-WLH-GST_LIB.amd64 ?= $(PATH_SDK_WINSDK10_KM_LIB_W7.amd64)
+          PATH_SDK_WINSDK10-KM-WLH-GST_LIB       ?= $(PATH_SDK_WINSDK10-KM-WLH-GST_LIB.$(KBUILD_TARGET_ARCH))
+          '@
 
           Write-Host "=== AutoConfig.kmk Content ===";
           if (Test-Path "AutoConfig.kmk") { Get-Content "AutoConfig.kmk"; }
