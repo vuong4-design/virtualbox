@@ -26,9 +26,238 @@
  */
 
 #include "ConsoleImplConfigCloak.h"
+#include "ConsoleImplConfigCloakCfgm.h"
 
 #include <iprt/test.h>
 #include <iprt/uuid.h>
+
+typedef struct TESTCFGMVALUE
+{
+    struct TESTCFGMVALUE *pNext;
+    char szName[64];
+    bool fInteger;
+    uint64_t u64Value;
+    char szValue[256];
+} TESTCFGMVALUE;
+
+typedef struct TESTCFGMNODE
+{
+    struct TESTCFGMNODE *pNext;
+    char szPath[128];
+    TESTCFGMVALUE *pValues;
+} TESTCFGMNODE;
+
+typedef struct TESTCFGM
+{
+    TESTCFGMNODE *pNodes;
+    int rcGetChild;
+    int rcInsertString;
+    int rcInsertInteger;
+    int rcQueryString;
+    int rcQueryInteger;
+} TESTCFGM;
+
+static TESTCFGMNODE *testCfgmFindNode(TESTCFGM *pCfgm, const char *pszPath)
+{
+    if (!pCfgm || !pszPath)
+        return NULL;
+    for (TESTCFGMNODE *pNode = pCfgm->pNodes; pNode; pNode = pNode->pNext)
+        if (!RTStrCmp(pNode->szPath, pszPath))
+            return pNode;
+    return NULL;
+}
+
+static TESTCFGMNODE *testCfgmAddNode(TESTCFGM *pCfgm, const char *pszPath)
+{
+    TESTCFGMNODE *pNode = testCfgmFindNode(pCfgm, pszPath);
+    if (pNode)
+        return pNode;
+    pNode = (TESTCFGMNODE *)RTMemAllocZ(sizeof(*pNode));
+    if (!pNode)
+        return NULL;
+    RTStrCopy(pNode->szPath, sizeof(pNode->szPath), pszPath);
+    pNode->pNext = pCfgm->pNodes;
+    pCfgm->pNodes = pNode;
+    return pNode;
+}
+
+static TESTCFGMVALUE *testCfgmFindValue(TESTCFGMNODE *pNode, const char *pszName)
+{
+    if (!pNode || !pszName)
+        return NULL;
+    for (TESTCFGMVALUE *pValue = pNode->pValues; pValue; pValue = pValue->pNext)
+        if (!RTStrCmp(pValue->szName, pszName))
+            return pValue;
+    return NULL;
+}
+
+static TESTCFGMVALUE *testCfgmGetOrCreateValue(TESTCFGMNODE *pNode, const char *pszName)
+{
+    TESTCFGMVALUE *pValue = testCfgmFindValue(pNode, pszName);
+    if (pValue)
+        return pValue;
+    pValue = (TESTCFGMVALUE *)RTMemAllocZ(sizeof(*pValue));
+    if (!pValue)
+        return NULL;
+    RTStrCopy(pValue->szName, sizeof(pValue->szName), pszName);
+    pValue->pNext = pNode->pValues;
+    pNode->pValues = pValue;
+    return pValue;
+}
+
+static int testCfgmSetString(TESTCFGMNODE *pNode, const char *pszName, const char *pszValue)
+{
+    if (!pNode || !pszName || !pszValue)
+        return VERR_INVALID_PARAMETER;
+    TESTCFGMVALUE *pValue = testCfgmGetOrCreateValue(pNode, pszName);
+    if (!pValue)
+        return VERR_NO_MEMORY;
+    pValue->fInteger = false;
+    pValue->u64Value = 0;
+    return RTStrCopy(pValue->szValue, sizeof(pValue->szValue), pszValue);
+}
+
+static int testCfgmSetInteger(TESTCFGMNODE *pNode, const char *pszName, uint64_t u64Value)
+{
+    if (!pNode || !pszName)
+        return VERR_INVALID_PARAMETER;
+    TESTCFGMVALUE *pValue = testCfgmGetOrCreateValue(pNode, pszName);
+    if (!pValue)
+        return VERR_NO_MEMORY;
+    pValue->fInteger = true;
+    pValue->u64Value = u64Value;
+    pValue->szValue[0] = '\0';
+    return VINF_SUCCESS;
+}
+
+static void testCfgmRemoveValue(TESTCFGMNODE *pNode, const char *pszName)
+{
+    if (!pNode)
+        return;
+    TESTCFGMVALUE **ppValue = &pNode->pValues;
+    while (*ppValue)
+    {
+        if (!RTStrCmp((*ppValue)->szName, pszName))
+        {
+            TESTCFGMVALUE *pValue = *ppValue;
+            *ppValue = pValue->pNext;
+            RTMemFree(pValue);
+            return;
+        }
+        ppValue = &(*ppValue)->pNext;
+    }
+}
+
+static const char *testCfgmGetString(TESTCFGMNODE *pNode, const char *pszName)
+{
+    TESTCFGMVALUE *pValue = testCfgmFindValue(pNode, pszName);
+    return pValue && !pValue->fInteger ? pValue->szValue : NULL;
+}
+
+static uint64_t testCfgmGetInteger(TESTCFGMNODE *pNode, const char *pszName, uint64_t u64Default)
+{
+    TESTCFGMVALUE *pValue = testCfgmFindValue(pNode, pszName);
+    return pValue && pValue->fInteger ? pValue->u64Value : u64Default;
+}
+
+static void testCfgmDestroy(TESTCFGM *pCfgm)
+{
+    TESTCFGMNODE *pNode = pCfgm->pNodes;
+    while (pNode)
+    {
+        TESTCFGMNODE *pNextNode = pNode->pNext;
+        TESTCFGMVALUE *pValue = pNode->pValues;
+        while (pValue)
+        {
+            TESTCFGMVALUE *pNextValue = pValue->pNext;
+            RTMemFree(pValue);
+            pValue = pNextValue;
+        }
+        RTMemFree(pNode);
+        pNode = pNextNode;
+    }
+    pCfgm->pNodes = NULL;
+}
+
+static bool testCfgmExists(void *pvUser, void *pNode, const char *pszName)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    return pCfgm && pNode && testCfgmFindValue((TESTCFGMNODE *)pNode, pszName) != NULL;
+}
+
+static int testCfgmInsertString(void *pvUser, void *pNode, const char *pszName, const char *pszValue)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    if (!pCfgm)
+        return VERR_INVALID_PARAMETER;
+    if (pCfgm->rcInsertString)
+        return pCfgm->rcInsertString;
+    return testCfgmSetString((TESTCFGMNODE *)pNode, pszName, pszValue);
+}
+
+static int testCfgmInsertInteger(void *pvUser, void *pNode, const char *pszName, uint64_t u64Value)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    if (!pCfgm)
+        return VERR_INVALID_PARAMETER;
+    if (pCfgm->rcInsertInteger)
+        return pCfgm->rcInsertInteger;
+    return testCfgmSetInteger((TESTCFGMNODE *)pNode, pszName, u64Value);
+}
+
+static void *testCfgmGetChild(void *pvUser, void *pRoot, const char *pszPath)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    if (!pCfgm || !pRoot || pCfgm->rcGetChild)
+        return NULL;
+    return testCfgmFindNode(pCfgm, pszPath);
+}
+
+static int testCfgmQueryString(void *pvUser, void *pNode, const char *pszName, char *pszValue, size_t cbValue)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    if (!pCfgm)
+        return VERR_INVALID_PARAMETER;
+    if (pCfgm->rcQueryString)
+        return pCfgm->rcQueryString;
+    TESTCFGMVALUE *pValue = testCfgmFindValue((TESTCFGMNODE *)pNode, pszName);
+    if (!pValue)
+        return VERR_CFGM_VALUE_NOT_FOUND;
+    if (pValue->fInteger)
+        return VERR_CFGM_NOT_STRING;
+    if (strlen(pValue->szValue) >= cbValue)
+        return VERR_CFGM_NOT_ENOUGH_SPACE;
+    return RTStrCopy(pszValue, cbValue, pValue->szValue);
+}
+
+static int testCfgmQueryInteger(void *pvUser, void *pNode, const char *pszName, uint64_t *pu64Value)
+{
+    TESTCFGM *pCfgm = (TESTCFGM *)pvUser;
+    if (!pCfgm)
+        return VERR_INVALID_PARAMETER;
+    if (pCfgm->rcQueryInteger)
+        return pCfgm->rcQueryInteger;
+    TESTCFGMVALUE *pValue = testCfgmFindValue((TESTCFGMNODE *)pNode, pszName);
+    if (!pValue)
+        return VERR_CFGM_VALUE_NOT_FOUND;
+    if (!pValue->fInteger)
+        return VERR_CFGM_NOT_INTEGER;
+    *pu64Value = pValue->u64Value;
+    return VINF_SUCCESS;
+}
+
+static CLOAKCFGMVTABLE testCfgmMakeVTable(TESTCFGM *pCfgm)
+{
+    CLOAKCFGMVTABLE VTable;
+    VTable.pvUser = pCfgm;
+    VTable.pfnExists = testCfgmExists;
+    VTable.pfnInsertString = testCfgmInsertString;
+    VTable.pfnInsertInteger = testCfgmInsertInteger;
+    VTable.pfnGetChild = testCfgmGetChild;
+    VTable.pfnQueryString = testCfgmQueryString;
+    VTable.pfnQueryInteger = testCfgmQueryInteger;
+    return VTable;
+}
 
 static void testSeedDecode(RTTEST hTest)
 {
@@ -155,6 +384,8 @@ static void testManifestValidation(RTTEST hTest)
     Profile.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
     Profile.uVmmDevVendorId = 0x80ee;
     Profile.uVmmDevDeviceId = 0xcafe;
+    Profile.pszSourceModel = "test-model";
+    Profile.pszSourceBiosDate = "19700101";
     Profile.pszProvenanceHash = "sha256:test";
 
     CLOAKBUILDMANIFEST Manifest = {};
@@ -174,6 +405,9 @@ static void testManifestValidation(RTTEST hTest)
     BadProfile.enmClass = CLOAKPROFILE_DRAFT;
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&BadProfile, &Manifest), VERR_ACCESS_DENIED);
 
+    BadProfile.enmClass = CLOAKPROFILE_RESEARCH_ONLY;
+    RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&BadProfile, &Manifest), VERR_ACCESS_DENIED);
+
     Bad = Manifest;
     Bad.pszFirmwareFamily = "insyde";
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&Profile, &Bad), VERR_NOT_SUPPORTED);
@@ -189,6 +423,14 @@ static void testManifestValidation(RTTEST hTest)
     Bad = Manifest;
     Bad.uVmmDevDeviceId = 0xbeef;
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&Profile, &Bad), VERR_NOT_SUPPORTED);
+
+    BadProfile = Profile;
+    BadProfile.pszSourceModel = NULL;
+    RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&BadProfile, &Manifest), VERR_NOT_SUPPORTED);
+
+    BadProfile = Profile;
+    BadProfile.pszSourceBiosDate = "";
+    RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&BadProfile, &Manifest), VERR_NOT_SUPPORTED);
 
     BadProfile = Profile;
     BadProfile.pszProvenanceHash = NULL;
@@ -223,6 +465,207 @@ static void testSeedHash(RTTEST hTest)
     RTTESTI_CHECK_RC(CloakSeedHashHex(abSeedA, sizeof(abSeedA), szHashA, 16), VERR_INVALID_PARAMETER);
 }
 
+static MACHINEPROFILE makeMaterializableProfile(void)
+{
+    MACHINEPROFILE Profile = {};
+    Profile.pszProfileId = "test-profile-materialize";
+    Profile.pszSystemVendor = "VBoxCloak";
+    Profile.pszSystemProduct = "Synthetic";
+    Profile.pszSystemVersion = "1.0";
+    Profile.pszSystemFamily = "Synthetic";
+    Profile.pszBiosVendor = "VBoxCloak";
+    Profile.pszBiosVersion = "1.0";
+    Profile.pszBiosReleaseDate = "19700101";
+    Profile.pszBoardVendor = "VBoxCloak";
+    Profile.pszBoardProduct = "Synthetic";
+    Profile.pszChassisVendor = "VBoxCloak";
+    Profile.pszChassisType = "Notebook";
+    Profile.pszAcpiOemId = "VBOX";
+    return Profile;
+}
+
+static void testChassisType(RTTEST hTest)
+{
+    RTTestSub(hTest, "Chassis type mapping");
+
+    uint32_t u32Type = 0;
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("Other", &u32Type), VINF_SUCCESS);
+    RTTESTI_CHECK(u32Type == 1);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("Notebook", &u32Type), VINF_SUCCESS);
+    RTTESTI_CHECK(u32Type == 10);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("36", &u32Type), VINF_SUCCESS);
+    RTTESTI_CHECK(u32Type == 36);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("37", &u32Type), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("0", &u32Type), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("Desktop-Stock", &u32Type), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("", &u32Type), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString(NULL, &u32Type), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakChassisTypeFromString("Other", NULL), VERR_INVALID_PARAMETER);
+}
+
+static void testProfileMaterializationFields(RTTEST hTest)
+{
+    RTTestSub(hTest, "Profile materialization fields");
+
+    MACHINEPROFILE Profile = makeMaterializableProfile();
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VINF_SUCCESS);
+
+    Profile.pszSystemVendor = "";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszBiosReleaseDate = "";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszAcpiOemId = "";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    char szLong[256 + 1];
+    memset(szLong, 'A', 256);
+    szLong[256] = '\0';
+
+    Profile = makeMaterializableProfile();
+    Profile.pszSystemVendor = szLong;
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszSystemSKU = szLong;
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    char szProfileId[CLOAK_PROFILE_ID_MAX + 1];
+    memset(szProfileId, 'A', CLOAK_PROFILE_ID_MAX);
+    szProfileId[CLOAK_PROFILE_ID_MAX] = '\0';
+    Profile = makeMaterializableProfile();
+    Profile.pszProfileId = szProfileId;
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszAcpiOemId = "TOOLONG";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszAcpiCreatorId = "TOOLS";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszAcpiOemTabId = "ABC";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    Profile = makeMaterializableProfile();
+    Profile.pszChassisType = "Unsupported";
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(&Profile), VERR_INVALID_PARAMETER);
+
+    RTTESTI_CHECK_RC(CloakValidateProfileForMaterialization(NULL), VERR_INVALID_PARAMETER);
+}
+
+static void testCfgmMaterialization(RTTEST hTest)
+{
+    RTTestSub(hTest, "CFGM materialization");
+
+    TESTCFGM Cfgm = {};
+    TESTCFGMNODE *pRoot = testCfgmAddNode(&Cfgm, "root");
+    TESTCFGMNODE *pFirmware = testCfgmAddNode(&Cfgm, "Devices/pcbios/0/Config");
+    TESTCFGMNODE *pAcpi = testCfgmAddNode(&Cfgm, "Devices/acpi/0/Config");
+    CLOAKCFGMVTABLE VTable = testCfgmMakeVTable(&Cfgm);
+    MACHINEPROFILE Profile = makeMaterializableProfile();
+
+    RTTESTI_CHECK(pRoot != NULL);
+    RTTESTI_CHECK(CloakCfgmGetFirmwareConfig(&VTable, pRoot) == pFirmware);
+
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTable, pFirmware, pAcpi, &Profile), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pFirmware, "DmiSystemVendor"), "VBoxCloak"));
+    RTTESTI_CHECK(testCfgmGetInteger(pFirmware, "DmiChassisType", 0) == 10);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pAcpi, "AcpiOemId"), "VBOX"));
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pFirmware, "DmiSystemVendor", "UserVendor"), VINF_SUCCESS);
+    Profile.pszSystemVendor = "ProfileVendor";
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTable, pFirmware, pAcpi, &Profile), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pFirmware, "DmiSystemVendor"), "UserVendor"));
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pFirmware, "DmiChassisType", 3), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTable, pFirmware, pAcpi, &Profile), VINF_SUCCESS);
+    RTTESTI_CHECK(testCfgmGetInteger(pFirmware, "DmiChassisType", 0) == 3);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pFirmware, "DmiChassisType", 10), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pFirmware, "DmiSystemVendor", ""), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pFirmware, "DmiSystemVendor", "UserVendor"), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pFirmware, "DmiChassisType", 99), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pFirmware, "DmiChassisType", 10), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pAcpi, "AcpiOemTabId", "ABC"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAcpi, "AcpiOemTabId", "OEMT"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pAcpi, "AcpiCreatorId", "TOOLS"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAcpi, "AcpiCreatorId", "TOOL"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VINF_SUCCESS);
+
+    testCfgmRemoveValue(pAcpi, "AcpiOemId");
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_NOT_FOUND);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAcpi, "AcpiOemId", "VBOX"), VINF_SUCCESS);
+
+    testCfgmRemoveValue(pFirmware, "DmiSystemFamily");
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTable, pFirmware, pAcpi), VERR_NOT_FOUND);
+    testCfgmDestroy(&Cfgm);
+
+    TESTCFGM CfgmNoAcpi = {};
+    TESTCFGMNODE *pFirmwareNoAcpi = testCfgmAddNode(&CfgmNoAcpi, "Devices/pcbios/0/Config");
+    CLOAKCFGMVTABLE VTableNoAcpi = testCfgmMakeVTable(&CfgmNoAcpi);
+    Profile = makeMaterializableProfile();
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableNoAcpi, pFirmwareNoAcpi, NULL, &Profile), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTableNoAcpi, pFirmwareNoAcpi, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK(testCfgmGetString(pFirmwareNoAcpi, "AcpiOemId") == NULL);
+    testCfgmDestroy(&CfgmNoAcpi);
+
+    TESTCFGM CfgmMissing = {};
+    CLOAKCFGMVTABLE VTableMissing = testCfgmMakeVTable(&CfgmMissing);
+    RTTESTI_CHECK(CloakCfgmGetFirmwareConfig(&VTableMissing, NULL) == NULL);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableMissing, NULL, NULL, &Profile), VERR_NOT_FOUND);
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTableMissing, NULL, NULL), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableMissing, NULL, NULL, NULL), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeString(NULL, NULL, "X", "Y"), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeInteger(NULL, NULL, "X", 1), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeString(&VTableMissing, NULL, "X", "Y"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeInteger(&VTableMissing, NULL, "X", 1), VINF_SUCCESS);
+    testCfgmDestroy(&CfgmMissing);
+
+    TESTCFGM CfgmSelect = {};
+    TESTCFGMNODE *pRootSelect = testCfgmAddNode(&CfgmSelect, "root");
+    TESTCFGMNODE *pEfi = testCfgmAddNode(&CfgmSelect, "Devices/efi/0/Config");
+    CLOAKCFGMVTABLE VTableSelect = testCfgmMakeVTable(&CfgmSelect);
+    RTTESTI_CHECK(CloakCfgmGetFirmwareConfig(&VTableSelect, pRootSelect) == pEfi);
+    TESTCFGMNODE *pPcBios = testCfgmAddNode(&CfgmSelect, "Devices/pcbios/0/Config");
+    RTTESTI_CHECK(CloakCfgmGetFirmwareConfig(&VTableSelect, pRootSelect) == pPcBios);
+    testCfgmDestroy(&CfgmSelect);
+
+    TESTCFGM CfgmError = {};
+    TESTCFGMNODE *pFirmwareError = testCfgmAddNode(&CfgmError, "Devices/pcbios/0/Config");
+    CLOAKCFGMVTABLE VTableError = testCfgmMakeVTable(&CfgmError);
+    Profile = makeMaterializableProfile();
+    CfgmError.rcGetChild = VERR_ACCESS_DENIED;
+    RTTESTI_CHECK(CloakCfgmGetFirmwareConfig(&VTableError, pFirmwareError) == NULL);
+    CfgmError.rcGetChild = VINF_SUCCESS;
+    CfgmError.rcInsertString = VERR_NO_MEMORY;
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableError, pFirmwareError, NULL, &Profile), VERR_NO_MEMORY);
+    CfgmError.rcInsertString = VINF_SUCCESS;
+    CfgmError.rcInsertInteger = VERR_NO_MEMORY;
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableError, pFirmwareError, NULL, &Profile), VERR_NO_MEMORY);
+    CfgmError.rcInsertInteger = VINF_SUCCESS;
+    RTTESTI_CHECK_RC(CloakCfgmMaterializeProfile(&VTableError, pFirmwareError, NULL, &Profile), VINF_SUCCESS);
+    CfgmError.rcQueryString = VERR_ACCESS_DENIED;
+    RTTESTI_CHECK_RC(CloakCfgmValidateEffectiveConfig(&VTableError, pFirmwareError, NULL), VERR_ACCESS_DENIED);
+    testCfgmDestroy(&CfgmError);
+}
+
 static void testProfileClassNames(RTTEST hTest)
 {
     RTTestSub(hTest, "Profile class names");
@@ -246,6 +689,9 @@ int main()
         testSeedStreams(hTest);
         testManifestValidation(hTest);
         testSeedHash(hTest);
+        testChassisType(hTest);
+        testProfileMaterializationFields(hTest);
+        testCfgmMaterialization(hTest);
         testProfileClassNames(hTest);
 
         rcExit = RTTestSummaryAndDestroy(hTest);

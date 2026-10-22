@@ -156,6 +156,123 @@ typedef struct CLOAKBUILDMANIFEST
 } CLOAKBUILDMANIFEST;
 typedef const CLOAKBUILDMANIFEST *PCCLOAKBUILDMANIFEST;
 
+DECLINLINE(int) CloakChassisTypeFromString(const char *pszType, uint32_t *pu32Type)
+{
+    if (!pszType || !*pszType || !pu32Type)
+        return VERR_INVALID_PARAMETER;
+
+    static const struct
+    {
+        const char *pszName;
+        uint32_t    u32Type;
+    } s_aTypes[] =
+    {
+        { "Other",                 1 },
+        { "Unknown",               2 },
+        { "Desktop",               3 },
+        { "Low Profile Desktop",   4 },
+        { "Pizza Box",             5 },
+        { "Mini Tower",            6 },
+        { "Tower",                 7 },
+        { "Portable",              8 },
+        { "Laptop",                9 },
+        { "Notebook",             10 },
+        { "Hand Held",            11 },
+        { "Docking Station",      12 },
+        { "All in One",           13 },
+        { "Sub Notebook",         14 },
+        { "Space-saving",         15 },
+        { "Lunch Box",            16 },
+        { "Main Server Chassis",  17 },
+        { "Expansion Chassis",    18 },
+        { "SubChassis",           19 },
+        { "Bus Expansion Chassis", 20 },
+        { "Peripheral Chassis",   21 },
+        { "RAID Chassis",         22 },
+        { "Rack Mount Chassis",   23 },
+        { "Sealed-case PC",       24 },
+        { "Multi-system Chassis", 25 },
+        { "CompactPCI",           26 },
+        { "AdvancedTCA",          27 },
+        { "Blade",                28 },
+        { "Blade Enclosure",      29 },
+        { "Tablet",               30 },
+        { "Convertible",          31 },
+        { "Detachable",           32 },
+        { "IoT Gateway",          33 },
+        { "Embedded PC",          34 },
+        { "Mini PC",              35 },
+        { "Stick PC",             36 }
+    };
+
+    for (size_t i = 0; i < RT_ELEMENTS(s_aTypes); i++)
+        if (!RTStrICmp(pszType, s_aTypes[i].pszName))
+        {
+            *pu32Type = s_aTypes[i].u32Type;
+            return VINF_SUCCESS;
+        }
+
+    uint32_t u32Type = 0;
+    int vrc = RTStrToUInt32Full(pszType, 10, &u32Type);
+    if (RT_SUCCESS(vrc) && u32Type >= 1 && u32Type <= 36)
+    {
+        *pu32Type = u32Type;
+        return VINF_SUCCESS;
+    }
+    return VERR_INVALID_PARAMETER;
+}
+
+DECLINLINE(int) CloakValidateProfileForMaterialization(const MACHINEPROFILE *pProfile)
+{
+    if (!pProfile)
+        return VERR_INVALID_PARAMETER;
+
+    const char * const s_apszRequired[] =
+    {
+        pProfile->pszProfileId,
+        pProfile->pszSystemVendor,
+        pProfile->pszSystemProduct,
+        pProfile->pszSystemVersion,
+        pProfile->pszSystemFamily,
+        pProfile->pszBiosVendor,
+        pProfile->pszBiosVersion,
+        pProfile->pszBiosReleaseDate,
+        pProfile->pszBoardVendor,
+        pProfile->pszBoardProduct,
+        pProfile->pszChassisVendor,
+        pProfile->pszChassisType,
+        pProfile->pszAcpiOemId
+    };
+    for (size_t i = 0; i < RT_ELEMENTS(s_apszRequired); i++)
+        if (!s_apszRequired[i] || !*s_apszRequired[i] || strlen(s_apszRequired[i]) > 255)
+            return VERR_INVALID_PARAMETER;
+
+    const char * const s_apszOptional[] =
+    {
+        pProfile->pszSystemSKU,
+        pProfile->pszSystemSerial,
+        pProfile->pszBoardSerial,
+        pProfile->pszChassisSerial,
+        pProfile->pszAcpiCreatorId,
+        pProfile->pszAcpiOemTabId
+    };
+    for (size_t i = 0; i < RT_ELEMENTS(s_apszOptional); i++)
+        if (s_apszOptional[i] && strlen(s_apszOptional[i]) > 255)
+            return VERR_INVALID_PARAMETER;
+
+    if (strlen(pProfile->pszProfileId) >= CLOAK_PROFILE_ID_MAX)
+        return VERR_INVALID_PARAMETER;
+    if (strlen(pProfile->pszAcpiOemId) > 6)
+        return VERR_INVALID_PARAMETER;
+    if (pProfile->pszAcpiCreatorId && strlen(pProfile->pszAcpiCreatorId) > 4)
+        return VERR_INVALID_PARAMETER;
+    if (pProfile->pszAcpiOemTabId && strlen(pProfile->pszAcpiOemTabId) != 4)
+        return VERR_INVALID_PARAMETER;
+
+    uint32_t u32ChassisType = 0;
+    return CloakChassisTypeFromString(pProfile->pszChassisType, &u32ChassisType);
+}
+
 DECLINLINE(int) CloakValidateProfileAgainstManifest(const MACHINEPROFILE *pProfile, PCCLOAKBUILDMANIFEST pManifest)
 {
     if (!pProfile || !pManifest || !pManifest->pszBuildMode)
@@ -174,7 +291,9 @@ DECLINLINE(int) CloakValidateProfileAgainstManifest(const MACHINEPROFILE *pProfi
     if (   pProfile->uVmmDevVendorId != pManifest->uVmmDevVendorId
         || pProfile->uVmmDevDeviceId != pManifest->uVmmDevDeviceId)
         return VERR_NOT_SUPPORTED;
-    if (!pProfile->pszProvenanceHash || !*pProfile->pszProvenanceHash)
+    if (   !pProfile->pszSourceModel || !*pProfile->pszSourceModel
+        || !pProfile->pszSourceBiosDate || !*pProfile->pszSourceBiosDate
+        || !pProfile->pszProvenanceHash || !*pProfile->pszProvenanceHash)
         return VERR_NOT_SUPPORTED;
     return VINF_SUCCESS;
 }

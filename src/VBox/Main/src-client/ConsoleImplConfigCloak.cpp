@@ -30,6 +30,7 @@
 
 #include "ConsoleImpl.h"
 #include "ConsoleImplConfigCloak.h"
+#include "ConsoleImplConfigCloakCfgm.h"
 
 #include <VBox/com/Guid.h>
 #include <VBox/err.h>
@@ -194,6 +195,49 @@ static int cloakQueryString(PCVMMR3VTABLE pVMM, PCFGMNODE pNode, const char *psz
     return pVMM->pfnCFGMR3QueryString(pNode, pszName, pszValue, cbValue);
 }
 
+static bool cloakVmmCfgmExists(void *pvUser, void *pNode, const char *pszName)
+{
+    return ((PCVMMR3VTABLE)pvUser)->pfnCFGMR3Exists((PCFGMNODE)pNode, pszName);
+}
+
+static int cloakVmmCfgmInsertString(void *pvUser, void *pNode, const char *pszName, const char *pszValue)
+{
+    return ((PCVMMR3VTABLE)pvUser)->pfnCFGMR3InsertString((PCFGMNODE)pNode, pszName, pszValue);
+}
+
+static int cloakVmmCfgmInsertInteger(void *pvUser, void *pNode, const char *pszName, uint64_t u64Value)
+{
+    return ((PCVMMR3VTABLE)pvUser)->pfnCFGMR3InsertInteger((PCFGMNODE)pNode, pszName, u64Value);
+}
+
+static void *cloakVmmCfgmGetChild(void *pvUser, void *pRoot, const char *pszPath)
+{
+    return (void *)((PCVMMR3VTABLE)pvUser)->pfnCFGMR3GetChild((PCFGMNODE)pRoot, pszPath);
+}
+
+static int cloakVmmCfgmQueryString(void *pvUser, void *pNode, const char *pszName, char *pszValue, size_t cbValue)
+{
+    return ((PCVMMR3VTABLE)pvUser)->pfnCFGMR3QueryString((PCFGMNODE)pNode, pszName, pszValue, cbValue);
+}
+
+static int cloakVmmCfgmQueryInteger(void *pvUser, void *pNode, const char *pszName, uint64_t *pu64Value)
+{
+    return ((PCVMMR3VTABLE)pvUser)->pfnCFGMR3QueryInteger((PCFGMNODE)pNode, pszName, pu64Value);
+}
+
+static CLOAKCFGMVTABLE cloakCreateCfgmVTable(PCVMMR3VTABLE pVMM)
+{
+    CLOAKCFGMVTABLE Cfgm;
+    Cfgm.pvUser = (void *)pVMM;
+    Cfgm.pfnExists = cloakVmmCfgmExists;
+    Cfgm.pfnInsertString = cloakVmmCfgmInsertString;
+    Cfgm.pfnInsertInteger = cloakVmmCfgmInsertInteger;
+    Cfgm.pfnGetChild = cloakVmmCfgmGetChild;
+    Cfgm.pfnQueryString = cloakVmmCfgmQueryString;
+    Cfgm.pfnQueryInteger = cloakVmmCfgmQueryInteger;
+    return Cfgm;
+}
+
 int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *pMachine)
 {
     RT_NOREF(pVirtualBox, pMachine);
@@ -224,12 +268,14 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                 pManifest && pManifest->pszBuildMode ? pManifest->pszBuildMode : "unknown"));
         return VERR_NOT_SUPPORTED;
     }
+    if (!pManifest->pszFirmwareFamily || !pManifest->fSupportedChipsets)
+        LogRel(("Cloak: build manifest is incomplete; no production profile can match it yet\n"));
 
     char szProfile[CLOAK_PROFILE_ID_MAX];
     vrc = cloakQueryString(mpVMM, pCloak, "Profile", szProfile, sizeof(szProfile));
     if (RT_FAILURE(vrc))
     {
-        LogRel(("Cloak: /Cloak/Profile is missing or invalid, vrc=%Rrc\n", vrc));
+        LogRel(("Cloak: /Cloak/Profile is required; automatic selection is not implemented, vrc=%Rrc\n", vrc));
         return vrc;
     }
 
@@ -244,6 +290,14 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         LogRel(("Cloak: profile '%s' has non-production class %s\n",
                 pProfile->pszProfileId, CloakProfileClassToString(pProfile->enmClass)));
         return VERR_ACCESS_DENIED;
+    }
+
+    vrc = CloakValidateProfileForMaterialization(pProfile);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: profile '%s' is missing materializable identity fields, vrc=%Rrc\n",
+                pProfile->pszProfileId, vrc));
+        return vrc;
     }
 
     vrc = CloakValidateProfileAgainstManifest(pProfile, pManifest);
@@ -315,6 +369,31 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         return VERR_MISMATCH;
     }
 
+    CLOAKCFGMVTABLE Cfgm = cloakCreateCfgmVTable(mpVMM);
+    void *pFirmware = CloakCfgmGetFirmwareConfig(&Cfgm, pRoot);
+    if (!pFirmware)
+    {
+        LogRel(("Cloak: firmware configuration is unavailable\n"));
+        return VERR_NOT_FOUND;
+    }
+
+    void *pAcpi = (void *)mpVMM->pfnCFGMR3GetChild(pRoot, "Devices/acpi/0/Config");
+    if (!pAcpi)
+        LogRel(("Cloak: ACPI configuration is unavailable; ACPI identity will not be materialized\n"));
+    vrc = CloakCfgmMaterializeProfile(&Cfgm, pFirmware, pAcpi, pProfile);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: failed to materialize profile '%s', vrc=%Rrc\n", pProfile->pszProfileId, vrc));
+        return vrc;
+    }
+
+    vrc = CloakCfgmValidateEffectiveConfig(&Cfgm, pFirmware, pAcpi);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: effective profile '%s' is inconsistent, vrc=%Rrc\n", pProfile->pszProfileId, vrc));
+        return vrc;
+    }
+
     try
     {
         PCFGMNODE pResolved = NULL;
@@ -333,7 +412,6 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         return x.m_vrc;
     }
 
-    LogRel(("Cloak: profile '%s' selected; runtime identity materialization deferred\n",
-            pProfile->pszProfileId));
+    LogRel(("Cloak: profile '%s' materialized\n", pProfile->pszProfileId));
     return VINF_SUCCESS;
 }
