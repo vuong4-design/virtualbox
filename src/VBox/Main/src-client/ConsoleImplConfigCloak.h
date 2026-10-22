@@ -52,6 +52,13 @@ AssertCompile(CLOAK_SEED_HEX_SIZE == RTSHA256_DIGEST_LEN);
 #define CLOAKCHIPSET_I440FX             RT_BIT_32(0)
 #define CLOAKCHIPSET_PIIX3              RT_BIT_32(1)
 #define CLOAKCHIPSET_ICH9               RT_BIT_32(2)
+#define CLOAKCHIPSET_ALL                (CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3 | CLOAKCHIPSET_ICH9)
+
+#define CLOAKBINDING_VMMDEV_VENDOR_ID   0x80ee
+#define CLOAKBINDING_VMMDEV_DEVICE_ID   0xcafe
+#define CLOAKBINDING_VGA_VENDOR_ID      0x80ee
+#define CLOAKBINDING_VGA_DEVICE_ID      0xbeef
+#define CLOAKBINDING_VIRTIO_VENDOR_ID   0x1af4
 
 typedef enum CLOAKPROFILECLASS
 {
@@ -273,14 +280,42 @@ DECLINLINE(int) CloakValidateProfileForMaterialization(const MACHINEPROFILE *pPr
     return CloakChassisTypeFromString(pProfile->pszChassisType, &u32ChassisType);
 }
 
+DECLINLINE(int) CloakValidateBuildManifest(PCCLOAKBUILDMANIFEST pManifest)
+{
+    if (!pManifest || !pManifest->pszBuildMode)
+        return VERR_INVALID_PARAMETER;
+    if (RTStrCmp(pManifest->pszBuildMode, "cloak"))
+        return VERR_NOT_SUPPORTED;
+    if (   !pManifest->pszFirmwareFamily || !*pManifest->pszFirmwareFamily
+        || !pManifest->fSupportedChipsets
+        || (pManifest->fSupportedChipsets & ~CLOAKCHIPSET_ALL))
+        return VERR_NOT_SUPPORTED;
+    if (   pManifest->uVmmDevVendorId != CLOAKBINDING_VMMDEV_VENDOR_ID
+        || pManifest->uVmmDevDeviceId != CLOAKBINDING_VMMDEV_DEVICE_ID
+        || pManifest->uVgaVendorId != CLOAKBINDING_VGA_VENDOR_ID
+        || pManifest->uVgaDeviceId != CLOAKBINDING_VGA_DEVICE_ID
+        || pManifest->uVirtioVendorId != CLOAKBINDING_VIRTIO_VENDOR_ID)
+        return VERR_NOT_SUPPORTED;
+    if (   !pManifest->pszDsdtHash || !*pManifest->pszDsdtHash
+        || !pManifest->pszVgaBiosHash || !*pManifest->pszVgaBiosHash
+        || !pManifest->pszBiosRomHash || !*pManifest->pszBiosRomHash
+        || !pManifest->pszSourceRevision || !*pManifest->pszSourceRevision
+        || !pManifest->pszBuildHash || !*pManifest->pszBuildHash)
+        return VERR_NOT_SUPPORTED;
+    return VINF_SUCCESS;
+}
+
 DECLINLINE(int) CloakValidateProfileAgainstManifest(const MACHINEPROFILE *pProfile, PCCLOAKBUILDMANIFEST pManifest)
 {
     if (!pProfile || !pManifest || !pManifest->pszBuildMode)
         return VERR_INVALID_PARAMETER;
+
+    int vrc = CloakValidateBuildManifest(pManifest);
+    if (RT_FAILURE(vrc))
+        return vrc;
+
     if (pProfile->enmClass != CLOAKPROFILE_COMPATIBLE)
         return VERR_ACCESS_DENIED;
-    if (RTStrCmp(pManifest->pszBuildMode, "cloak"))
-        return VERR_NOT_SUPPORTED;
     if (   !pProfile->pszRequiredFirmwareFamily
         || !pManifest->pszFirmwareFamily
         || RTStrCmp(pProfile->pszRequiredFirmwareFamily, pManifest->pszFirmwareFamily))
@@ -295,6 +330,29 @@ DECLINLINE(int) CloakValidateProfileAgainstManifest(const MACHINEPROFILE *pProfi
         || !pProfile->pszSourceBiosDate || !*pProfile->pszSourceBiosDate
         || !pProfile->pszProvenanceHash || !*pProfile->pszProvenanceHash)
         return VERR_NOT_SUPPORTED;
+    return VINF_SUCCESS;
+}
+
+DECLINLINE(int) CloakValidateProductionRegistry(const MACHINEPROFILE * const *papProfiles, size_t cProfiles,
+                                                PCCLOAKBUILDMANIFEST pManifest)
+{
+    if ((!papProfiles && cProfiles) || (!pManifest && cProfiles))
+        return VERR_INVALID_PARAMETER;
+
+    for (size_t i = 0; i < cProfiles && papProfiles[i]; i++)
+    {
+        const MACHINEPROFILE *pProfile = papProfiles[i];
+        if (pProfile->enmClass != CLOAKPROFILE_COMPATIBLE)
+            return VERR_ACCESS_DENIED;
+
+        int vrc = CloakValidateProfileForMaterialization(pProfile);
+        if (RT_FAILURE(vrc))
+            return vrc;
+
+        vrc = CloakValidateProfileAgainstManifest(pProfile, pManifest);
+        if (RT_FAILURE(vrc))
+            return vrc;
+    }
     return VINF_SUCCESS;
 }
 

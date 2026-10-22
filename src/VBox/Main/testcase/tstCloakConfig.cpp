@@ -373,9 +373,73 @@ static void testSeedStreams(RTTEST hTest)
                                       &u64ProfileB, &u64SerialB, &u64JitterB), VERR_INVALID_PARAMETER);
 }
 
+static void testBuildManifestValidation(RTTEST hTest)
+{
+    RTTestSub(hTest, "Build manifest contract");
+
+    CLOAKBUILDMANIFEST Manifest = {};
+    Manifest.pszBuildMode = "cloak";
+    Manifest.pszFirmwareFamily = "ami";
+    Manifest.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
+    Manifest.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+    Manifest.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+    Manifest.uVgaVendorId = CLOAKBINDING_VGA_VENDOR_ID;
+    Manifest.uVgaDeviceId = CLOAKBINDING_VGA_DEVICE_ID;
+    Manifest.uVirtioVendorId = CLOAKBINDING_VIRTIO_VENDOR_ID;
+    Manifest.pszDsdtHash = "sha256:dsdt";
+    Manifest.pszVgaBiosHash = "sha256:vga";
+    Manifest.pszBiosRomHash = "sha256:bios";
+    Manifest.pszSourceRevision = "abcdef0";
+    Manifest.pszBuildHash = "sha256:build";
+
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Manifest), VINF_SUCCESS);
+
+    CLOAKBUILDMANIFEST Bad = Manifest;
+    Bad.pszBuildMode = "stock";
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.pszFirmwareFamily = "";
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.fSupportedChipsets = 0;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.fSupportedChipsets = RT_BIT_32(31);
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.uVmmDevDeviceId = 0x1551;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.uVgaVendorId = 0x10de;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.uVirtioVendorId = 0x10ec;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.pszDsdtHash = NULL;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.pszSourceRevision = "";
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.pszBuildHash = NULL;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(NULL), VERR_INVALID_PARAMETER);
+}
+
 static void testManifestValidation(RTTEST hTest)
 {
-    RTTestSub(hTest, "Build manifest validation");
+    RTTestSub(hTest, "Profile/manifest validation");
 
     MACHINEPROFILE Profile = {};
     Profile.pszProfileId = "test-profile";
@@ -392,8 +456,16 @@ static void testManifestValidation(RTTEST hTest)
     Manifest.pszBuildMode = "cloak";
     Manifest.pszFirmwareFamily = "ami";
     Manifest.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3 | CLOAKCHIPSET_ICH9;
-    Manifest.uVmmDevVendorId = 0x80ee;
-    Manifest.uVmmDevDeviceId = 0xcafe;
+    Manifest.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+    Manifest.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+    Manifest.uVgaVendorId = CLOAKBINDING_VGA_VENDOR_ID;
+    Manifest.uVgaDeviceId = CLOAKBINDING_VGA_DEVICE_ID;
+    Manifest.uVirtioVendorId = CLOAKBINDING_VIRTIO_VENDOR_ID;
+    Manifest.pszDsdtHash = "sha256:dsdt";
+    Manifest.pszVgaBiosHash = "sha256:vga";
+    Manifest.pszBiosRomHash = "sha256:bios";
+    Manifest.pszSourceRevision = "abcdef0";
+    Manifest.pszBuildHash = "sha256:build";
 
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&Profile, &Manifest), VINF_SUCCESS);
 
@@ -438,6 +510,66 @@ static void testManifestValidation(RTTEST hTest)
 
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(NULL, &Manifest), VERR_INVALID_PARAMETER);
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&Profile, NULL), VERR_INVALID_PARAMETER);
+}
+
+static MACHINEPROFILE makeMaterializableProfile(void);
+
+static void testProductionRegistry(RTTEST hTest)
+{
+    RTTestSub(hTest, "Production registry validation");
+
+    MACHINEPROFILE Profile = makeMaterializableProfile();
+    Profile.enmClass = CLOAKPROFILE_COMPATIBLE;
+    Profile.pszRequiredFirmwareFamily = "ami";
+    Profile.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
+    Profile.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+    Profile.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+    Profile.pszSourceModel = "test-model";
+    Profile.pszSourceBiosDate = "19700101";
+    Profile.pszProvenanceHash = "sha256:test";
+
+    CLOAKBUILDMANIFEST Manifest = {};
+    Manifest.pszBuildMode = "cloak";
+    Manifest.pszFirmwareFamily = "ami";
+    Manifest.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
+    Manifest.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+    Manifest.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+    Manifest.uVgaVendorId = CLOAKBINDING_VGA_VENDOR_ID;
+    Manifest.uVgaDeviceId = CLOAKBINDING_VGA_DEVICE_ID;
+    Manifest.uVirtioVendorId = CLOAKBINDING_VIRTIO_VENDOR_ID;
+    Manifest.pszDsdtHash = "sha256:dsdt";
+    Manifest.pszVgaBiosHash = "sha256:vga";
+    Manifest.pszBiosRomHash = "sha256:bios";
+    Manifest.pszSourceRevision = "abcdef0";
+    Manifest.pszBuildHash = "sha256:build";
+
+    const MACHINEPROFILE *apProfiles[] = { &Profile, NULL };
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apProfiles, RT_ELEMENTS(apProfiles), &Manifest), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(NULL, 0, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(NULL, 1, &Manifest), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apProfiles, RT_ELEMENTS(apProfiles), NULL), VERR_INVALID_PARAMETER);
+
+    MACHINEPROFILE DraftProfile = Profile;
+    DraftProfile.enmClass = CLOAKPROFILE_DRAFT;
+    const MACHINEPROFILE *apDraft[] = { &DraftProfile, NULL };
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apDraft, RT_ELEMENTS(apDraft), &Manifest), VERR_ACCESS_DENIED);
+
+    MACHINEPROFILE MissingSource = Profile;
+    MissingSource.pszSourceModel = NULL;
+    const MACHINEPROFILE *apMissingSource[] = { &MissingSource, NULL };
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apMissingSource, RT_ELEMENTS(apMissingSource), &Manifest),
+                     VERR_NOT_SUPPORTED);
+
+    MACHINEPROFILE MissingAcpi = Profile;
+    MissingAcpi.pszAcpiOemId = "";
+    const MACHINEPROFILE *apMissingAcpi[] = { &MissingAcpi, NULL };
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apMissingAcpi, RT_ELEMENTS(apMissingAcpi), &Manifest),
+                     VERR_INVALID_PARAMETER);
+
+    CLOAKBUILDMANIFEST BadManifest = Manifest;
+    BadManifest.pszFirmwareFamily = "insyde";
+    const MACHINEPROFILE *apOne[] = { &Profile };
+    RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apOne, RT_ELEMENTS(apOne), &BadManifest), VERR_NOT_SUPPORTED);
 }
 
 static void testSeedHash(RTTEST hTest)
@@ -687,7 +819,9 @@ int main()
         testSeedDecode(hTest);
         testHmac(hTest);
         testSeedStreams(hTest);
+        testBuildManifestValidation(hTest);
         testManifestValidation(hTest);
+        testProductionRegistry(hTest);
         testSeedHash(hTest);
         testChassisType(hTest);
         testProfileMaterializationFields(hTest);

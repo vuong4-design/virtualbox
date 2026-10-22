@@ -111,11 +111,11 @@ static const CLOAKBUILDMANIFEST g_StockBuildManifest =
     NULL,
     NULL,
     0,
-    0x80ee,
-    0xcafe,
-    0x80ee,
-    0xbeef,
-    0x1af4,
+    CLOAKBINDING_VMMDEV_VENDOR_ID,
+    CLOAKBINDING_VMMDEV_DEVICE_ID,
+    CLOAKBINDING_VGA_VENDOR_ID,
+    CLOAKBINDING_VGA_DEVICE_ID,
+    CLOAKBINDING_VIRTIO_VENDOR_ID,
     NULL,
     NULL
 };
@@ -130,11 +130,11 @@ static const CLOAKBUILDMANIFEST g_CloakBuildManifest =
     NULL,
     NULL,
     0,
-    0x80ee,
-    0xcafe,
-    0x80ee,
-    0xbeef,
-    0x1af4,
+    CLOAKBINDING_VMMDEV_VENDOR_ID,
+    CLOAKBINDING_VMMDEV_DEVICE_ID,
+    CLOAKBINDING_VGA_VENDOR_ID,
+    CLOAKBINDING_VGA_DEVICE_ID,
+    CLOAKBINDING_VIRTIO_VENDOR_ID,
     NULL,
     NULL
 };
@@ -268,8 +268,19 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                 pManifest && pManifest->pszBuildMode ? pManifest->pszBuildMode : "unknown"));
         return VERR_NOT_SUPPORTED;
     }
-    if (!pManifest->pszFirmwareFamily || !pManifest->fSupportedChipsets)
-        LogRel(("Cloak: build manifest is incomplete; no production profile can match it yet\n"));
+    vrc = CloakValidateBuildManifest(pManifest);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: build manifest is incomplete or violates the binding contract, vrc=%Rrc\n", vrc));
+        return vrc;
+    }
+
+    vrc = CloakValidateProductionRegistry(g_apCloakProfiles, RT_ELEMENTS(g_apCloakProfiles), pManifest);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: production profile registry is invalid, vrc=%Rrc\n", vrc));
+        return vrc;
+    }
 
     char szProfile[CLOAK_PROFILE_ID_MAX];
     vrc = cloakQueryString(mpVMM, pCloak, "Profile", szProfile, sizeof(szProfile));
