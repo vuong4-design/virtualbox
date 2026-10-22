@@ -33,6 +33,7 @@
 
 #include <VBox/com/Guid.h>
 #include <VBox/err.h>
+#include <VBox/vmm/vmmr3vtable.h>
 
 static const MACHINEPROFILE *cloakGetTestProfile(void)
 {
