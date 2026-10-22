@@ -59,10 +59,15 @@ VBoxSF_SOURCES.arm64 = \
 	Arm64CopySupStub.cpp
 
 if1of ($(KBUILD_TARGET_ARCH), amd64 x86)
+ ifeq ($(KBUILD_TARGET_ARCH),amd64)
+  VBoxSF_COPYSUP_LIB = $(VBoxSF_0_OUTDIR)/copysup.lib
+ else
+  VBoxSF_COPYSUP_LIB = $(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/copysup.lib
+ endif
  VBoxSF_LIBS = \
  	$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/rxce.lib \
  	$(VBoxSF_0_OUTDIR)/rdbsslib.lib \
- 	$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/copysup.lib \
+ 	$(VBoxSF_COPYSUP_LIB) \
  	$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/hal.lib \
  	$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/ksecdd.lib \
  	$(VBOX_LIB_VBGL_R0) \
@@ -91,7 +96,8 @@ endif
 
 if1of ($(KBUILD_TARGET_ARCH), amd64 x86)
  VBoxSF_CLEAN = \
- 	$(VBoxSF_0_OUTDIR)/rdbsslib.lib
+ 	$(VBoxSF_0_OUTDIR)/rdbsslib.lib \
+ 	$(VBoxSF_0_OUTDIR)/copysup.lib
 endif
 
 # Hack: The rdbsslib.lib we're using wasn't compiled -guard:ehcont.  Unfortunately
@@ -141,7 +147,7 @@ endif
 include $(FILE_KBUILD_SUB_FOOTER)
 
 #
-# rdbsslib.lib symbol editing for x86 and amd64.
+# rdbsslib.lib (x86/amd64) and copysup.lib (amd64) symbol editing.
 #
 ifeq ($(KBUILD_TARGET_ARCH),x86)
  $(call KB_FN_AUTO_CMD_DEPS,$(VBoxSF_0_OUTDIR)/rdbsslib.lib)
@@ -175,5 +181,14 @@ else ifeq ($(KBUILD_TARGET_ARCH),amd64)
                --redefine-sym "__imp_CcPurgeCacheSection=g_pfnWrPurgeCacheSection" \
 		--select "read.obj" \
                --redefine-sym "__imp_CcFlushCache=g_pfnRdFlushCache"
+
+ # The Windows 7 copysup.lib imports CcCopyWriteWontFlush, which is not
+ # available on Vista/XP64.  Redirect it to our local implementation.
+ $(call KB_FN_AUTO_CMD_DEPS,$(VBoxSF_0_OUTDIR)/copysup.lib)
+ $(VBoxSF_0_OUTDIR)/copysup.lib: $$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/copysup.lib | $$(dir $$@) $(VBOX_EDIT_COFF_LIB)
+	$(call KB_FN_AUTO_CMD_DEPS_COMMANDS)
+	$(VBOX_EDIT_COFF_LIB) --input $(requote sh,$(PATH_SDK_$(VBOX_WINDDK_GST_WLH)_LIB.$(KBUILD_TARGET_ARCH))/copysup.lib) --output "$@" \
+		--select "fastio2.obj" \
+               --redefine-sym "__imp_CcCopyWriteWontFlush=g_pfnCcCopyWriteWontFlush"
 endif # amd64
 

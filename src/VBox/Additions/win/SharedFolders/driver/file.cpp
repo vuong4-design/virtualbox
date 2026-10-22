@@ -127,6 +127,19 @@ static BOOLEAN NTAPI vbsfNtWriteCcPurgeCacheSection(PSECTION_OBJECT_POINTERS pSe
     return fRet;
 }
 
+/**
+ * For writes, replaces the Windows 7+ CcCopyWriteWontFlush import in copysup.
+ *
+ * The Windows 7 copysup.lib imports this API, but the driver also targets
+ * Vista and XP64 where it is unavailable.  Older Windows headers implement it
+ * as this simple length check, so do the same locally.
+ */
+static BOOLEAN NTAPI vbsfNtWriteCcCopyWriteWontFlush(PFILE_OBJECT pFileObject, PLARGE_INTEGER poffWrite, ULONG cbWrite)
+{
+    RT_NOREF(pFileObject, poffWrite);
+    return cbWrite <= 0x1000000;
+}
+
 extern "C" {
 /** This is what read.obj gets instead of __imp_CcFlushCache. */
 decltype(CcFlushCache)        *g_pfnRdFlushCache        = vbsfNtReadCcFlushCache;
@@ -134,6 +147,8 @@ decltype(CcFlushCache)        *g_pfnRdFlushCache        = vbsfNtReadCcFlushCache
 decltype(CcFlushCache)        *g_pfnWrFlushCache        = vbsfNtWriteCcFlushCache;
 /** This is what write.obj gets instead of __imp_CcPurgeCacheSection. */
 decltype(CcPurgeCacheSection) *g_pfnWrPurgeCacheSection = vbsfNtWriteCcPurgeCacheSection;
+/** This is what copysup's fastio2.obj gets instead of __imp_CcCopyWriteWontFlush. */
+BOOLEAN (NTAPI *g_pfnCcCopyWriteWontFlush)(PFILE_OBJECT, PLARGE_INTEGER, ULONG) = vbsfNtWriteCcCopyWriteWontFlush;
 }
 
 /** @} */
