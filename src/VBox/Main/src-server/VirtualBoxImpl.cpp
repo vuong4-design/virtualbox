@@ -2924,7 +2924,7 @@ HRESULT VirtualBox::setExtraData(const com::Utf8Str &aKey,
             return setError(E_ACCESSDENIED,
                             tr("Could not set extra data because someone refused the requested change of '%s' to '%s'%s%ls"),
                             strKey.c_str(),
-                            strValue.c_str(),
+                            strKey.equals("VBoxInternal/Cloak/Seed") ? "<redacted>" : strValue.c_str(),
                             sep,
                             error.raw());
         }
@@ -3747,7 +3747,10 @@ void VirtualBox::i_onMachineGroupsChanged(const Guid &aId)
  */
 BOOL VirtualBox::i_onExtraDataCanChange(const Guid &aId, const Utf8Str &aKey, const Utf8Str &aValue, Bstr &aError)
 {
-    LogFlowThisFunc(("machine={%RTuuid} aKey={%s} aValue={%s}\n", aId.raw(), aKey.c_str(), aValue.c_str()));
+    if (aKey.equals("VBoxInternal/Cloak/Seed"))
+        LogFlowThisFunc(("machine={%RTuuid} aKey={%s} aValue=<redacted>\n", aId.raw(), aKey.c_str()));
+    else
+        LogFlowThisFunc(("machine={%RTuuid} aKey={%s} aValue={%s}\n", aId.raw(), aKey.c_str(), aValue.c_str()));
 
     AutoCaller autoCaller(this);
     AssertComRCReturn(autoCaller.hrc(), FALSE);

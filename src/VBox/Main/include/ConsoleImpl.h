@@ -759,6 +759,7 @@ private:
     int i_configConstructorArmV8(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, AutoWriteLock *pAlock);
 #endif
     int i_configCfgmOverlay(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *pMachine);
+    int i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *pMachine);
     int i_configDumpAPISettingsTweaks(IVirtualBox *pVirtualBox, IMachine *pMachine);
 
     int i_configGraphicsController(PCFGMNODE pDevices,

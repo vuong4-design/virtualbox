@@ -733,6 +733,7 @@ int Console::i_configCfgmOverlay(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMac
             if (!strKey.startsWith("VBoxInternal/"))
                 continue;
 
+            const bool fCloakSeed = strKey.equals("VBoxInternal/Cloak/Seed");
             const char *pszExtraDataKey = strKey.c_str() + sizeof("VBoxInternal/") - 1;
 
             // get the value
@@ -750,7 +751,10 @@ int Console::i_configCfgmOverlay(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMac
                 fFirst = false;
                 LogRel(("Extradata overrides:\n"));
             }
-            LogRel(("  %s=\"%ls\"%s\n", strKey.c_str(), bstrExtraDataValue.raw(), i2 < cGlobalValues ? " (global)" : ""));
+            if (fCloakSeed)
+                LogRel(("  %s=\"<redacted>\"%s\n", strKey.c_str(), i2 < cGlobalValues ? " (global)" : ""));
+            else
+                LogRel(("  %s=\"%ls\"%s\n", strKey.c_str(), bstrExtraDataValue.raw(), i2 < cGlobalValues ? " (global)" : ""));
 
             /*
              * The key will be in the format "Node1/Node2/Value" or simply "Value".
@@ -837,8 +841,9 @@ int Console::i_configCfgmOverlay(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMac
                     vrc = mpVMM->pfnCFGMR3InsertInteger(pNode, pszCFGMValueName, u64Value);
                 else
                     vrc = mpVMM->pfnCFGMR3InsertString(pNode, pszCFGMValueName, strCFGMValueUtf8.c_str());
+                const char *pszLogValue = fCloakSeed ? "<redacted>" : strCFGMValueUtf8.c_str();
                 AssertLogRelMsgRCBreak(vrc, ("failed to insert CFGM value '%s' to key '%s'\n",
-                                             strCFGMValueUtf8.c_str(), pszExtraDataKey));
+                                             pszLogValue, pszExtraDataKey));
             }
         }
     }

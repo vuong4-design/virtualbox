@@ -4550,7 +4550,7 @@ HRESULT Machine::setExtraData(const com::Utf8Str &aKey, const com::Utf8Str &aVal
             return setError(E_ACCESSDENIED,
                             tr("Could not set extra data because someone refused the requested change of '%s' to '%s'%s%ls"),
                             aKey.c_str(),
-                            aValue.c_str(),
+                            aKey.equals("VBoxInternal/Cloak/Seed") ? "<redacted>" : aValue.c_str(),
                             sep,
                             bstrError.raw());
         }

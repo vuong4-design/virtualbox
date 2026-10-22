@@ -51,6 +51,7 @@ ifndef VBOX_ONLY_SDK
   	tstRecording \
   	tstSettings \
   	tstBstr \
+	tstCloakConfig \
   	tstGuid \
   	tstUnattendedScript \
   	tstVBoxCrypto
@@ -355,6 +356,14 @@ tstSettings_SOURCES  = \
 #
 tstBstr_TEMPLATE = VBoxMainClientTstExe
 tstBstr_SOURCES  = tstBstr.cpp
+
+
+#
+# tstCloakConfig
+#
+tstCloakConfig_TEMPLATE = VBoxR3TstExe
+tstCloakConfig_INCS = ../src-client
+tstCloakConfig_SOURCES = tstCloakConfig.cpp
 
 
 #

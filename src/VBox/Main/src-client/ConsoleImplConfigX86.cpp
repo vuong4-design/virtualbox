@@ -2055,6 +2055,12 @@ int Console::i_configConstructorX86(PUVM pUVM, PVM pVM, PCVMMR3VTABLE pVMM, Auto
         vrc = i_configCfgmOverlay(pRoot, virtualBox, pMachine);
 
     /*
+     * Apply the cloak machine profile engine after user overrides.
+     */
+    if (RT_SUCCESS(vrc))
+        vrc = i_configCloak(pRoot, virtualBox, pMachine);
+
+    /*
      * Dump all extradata API settings tweaks, both global and per VM.
      */
     if (RT_SUCCESS(vrc))

@@ -4,8 +4,8 @@
 >
 > **Mục tiêu:** xây dựng kế hoạch sửa mã nguồn VirtualBox để hiện thực hoá các lớp "cloak" (đổi identity mà guest nhìn thấy) đã được xác nhận trong tài liệu phân tích.
 >
-> **Trạng thái: KẾ HOẠCH — chưa triển khai code.** 4 quyết định thiết kế đã chốt tại [§10](#10-quyết-định-đã-chốt):
-> (1) chia 4 PR, (2) identity phải **đồng bộ** → Machine Profile Engine, (3) selector **random nhưng ổn định** theo VM UUID, (4) build qua **GitHub Actions**.
+> **Trạng thái: KẾ HOẠCH — chưa triển khai code.** 5 quyết định thiết kế đã chốt tại [§10](#10-quyết-định-đã-chốt):
+> (1) chia 6 PR theo vertical slice, (2) identity phải **đồng bộ** → Machine Profile Engine, (3) selector **random nhưng ổn định** bằng `CloakSeed` + VM UUID, (4) build qua **GitHub Actions + T3 self-hosted**, (5) `CloakEnabled=off` chỉ tắt lớp runtime; build-time asset phải dùng build stock riêng.
 >
 > **Không nằm trong phạm vi:** các payload ở tầng ISO/script của bản fork (AutoKMS crack, hosts-blocklist chống anti-fraud, browser-profile forgery, driver test-signing). Đó là tài nguyên của `cloak/Iso/`, không phải mã nguồn VirtualBox.
 
@@ -140,22 +140,23 @@ Tài liệu §46 / §48.1 — **cross-layer inconsistency** là failure mode l�
 - Intel-looking TPM (`INTC/CSME/PTT`) nhưng libtpms cũ + PCR properties cũ
 - NVIDIA-like graphics nhưng OBS IddCx EDID là `LNX / Linux FHD / Linux #0 / IddSample`
 
-**Kết luận của tài liệu §57:** detector coherence-based mạnh hơn detector chỉ tìm literal `VBOX`. Vì vậy Phase 6 (coherence) được đưa vào kế hoạch, không phải làm sau cùng.
+**Kết luận của tài liệu §57:** detector coherence-based mạnh hơn detector chỉ tìm literal `VBOX`. Vì vậy coherence là **acceptance gate của từng vertical slice** (PR-2/PR-3), không phải phase dọn dẹp cuối cùng.
 
 ---
 
 ## 3. Inventory đầy đủ: hook → vị trí trong mã nguồn
 
 > Cột "Nguồn" trỏ tới mục tương ứng trong `ANTIOS-VIRTUALBOX-CLOAK-HOOK-INVENTORY-20260906.md`.
-> Mọi `file:line` đã được verify trực tiếp trên `D:\virtualbox\src` @ `edfe7955aa0`.
+> Mọi `file:line` đã được verify trực tiếp trên `D:\virtualbox\src` (branch `VBox-7.2`, cây làm việc hiện tại). Khi rebase/merge phải re-map lại line number.
+> **Đây là inventory hook/giá trị của fork gốc, không phải target cuối.** Target đã chốt nằm ở §4.5 và Phase 1/2; các giá trị như `ACRSYS`, `ASUS`, `10EC`, `8086:1551` chỉ còn là ví dụ/lịch sử, không dùng mặc định.
 
 ### 3.1 CPU / hypervisor / timing
 
 | § | Hook | File:line | Ghi chú |
 |---|---|---|---|
-| 3.1 | Hyper-V vendor → `Microsoft   ` | `src/VBox/VMM/VMMR3/GIMR3Hv.cpp:245-248` | `CFGMR3QueryStringDef(pCfgHv, "VendorID", szVendor, sizeof(szVendor), "VBoxVBoxVBox")` — phải đúng 12 ký tự. Sink: leaf `0x40000000` EBX/ECX/EDX tại `GIMR3Hv.cpp:380-407` |
-| 3.2 | **Suppress HVP bit** | `src/VBox/VMM/VMMR3/target-x86/CPUMR3CpuId-x86.cpp:4017-4026` | `case CPUMCPUIDFEATURE_HVP:` — bỏ `\|= X86_CPUID_FEATURE_ECX_HVP` (0x80000000) và `fHypervisorPresent = 1` → clear thay vì set. Const: `include/iprt/x86.h:521` |
-| 3.2b | GIM provider dispatch | `src/VBox/VMM/VMMR3/GIMR3.cpp:156-184`; `GIMR3Hv.cpp:372-375`; `GIMR3Kvm.cpp:255-258`; `GIMR3Minimal.cpp:60-63` | Cả 3 provider đều gọi chung `CPUMR3SetGuestCpuIdFeature(..., HVP)` → phải xử lý cả 3 hoặc chỉ HyperV |
+| 3.1 | Hyper-V vendor → `Microsoft   ` | `src/VBox/VMM/VMMR3/GIMR3Hv.cpp:245-248` | Chỉ dùng ở chế độ `HyperV`; vendor phải đúng 12 ký tự. Sink: leaf `0x40000000` EBX/ECX/EDX tại `GIMR3Hv.cpp:380-407` |
+| 3.2 | **HVP presentation** | `src/VBox/VMM/VMMR3/target-x86/CPUMR3CpuId-x86.cpp:4017-4026` | Ở chế độ `Hidden`: clear HVP và **không** expose leaf/vendor Hyper-V. Ở chế độ `HyperV`: giữ HVP=1 và leaves đầy đủ. Không trộn hai trạng thái |
+| 3.2b | GIM provider dispatch | `src/VBox/VMM/VMMR3/GIMR3.cpp:156-184`; `GIMR3Hv.cpp:372-375`; `GIMR3Kvm.cpp:255-258`; `GIMR3Minimal.cpp:60-63` | Cả 3 provider đều gọi chung `CPUMR3SetGuestCpuIdFeature(..., HVP)`; `Hidden` phải dùng GIM `Minimal`/không GIM, `HyperV` mới dùng `GIMR3Hv` |
 | 4.1 | CPU profile mới, `DmiCPU → GuestCpuName` | `src/VBox/VMM/VMMR3/CPUMR3Db.cpp:154` (`g_apCpumDbEntries`), `:272-275` (`CPUMR3DbGetEntries`); đọc key: `target-x86/CPUMR3CpuId-x86.cpp:2817-2821` | Fork có 61 entry, stock 27. Profile: `i9-9900K`, `i7-9700K`, `i7-9750H`, `i9-9980XE`, `Ryzen 7 1800X`… ⚠ xem cảnh báo §7.8 bên dưới |
 | 4.1b | Producer `GuestCpuName` | `src/VBox/Main/src-client/ConsoleImplConfigX86.cpp:764` | `InsertConfigString(pCPUM, "GuestCpuName", bstrCpuProfile);` |
 | 5.1 | `TM/TSCMode=RealTSCOffset` | `src/VBox/VMM/VMMR3/...` (stock) | Đã có sẵn ở stock — chỉ cần expose trong UI, **không cần sửa VMM** |
@@ -164,6 +165,15 @@ Tài liệu §46 / §48.1 — **cross-layer inconsistency** là failure mode l�
 → **Không được copy brand string từ fork.** Phải dựng lại CPUID blob từ CPU thật, hoặc bỏ hẳn khỏi scope.
 
 Ngược lại, profile `AMD Ryzen 7 1800X Eight-Core` của fork **byte-for-byte giống** Oracle 7.1.6 và 7.2.4 → negative control tốt.
+
+**Quyết định HVP bắt buộc:** 3.1, 3.2 và 3.2b là **một thiết kế duy nhất**, không phải ba patch độc lập. Chọn `CloakHvPresentation`:
+
+| Mode | CPUID.1:ECX[31] | Leaf `0x40000000` | GIM provider | Dùng khi |
+|---|---|---|---|---|
+| `Hidden` (mặc định cho cloak) | 0 | Không vendor/leaves Hyper-V | `Minimal`/không GIM | Muốn giấu hypervisor hoàn toàn |
+| `HyperV` | 1 | `Microsoft Hv` + leaves đầy đủ | `GIMR3Hv` | Profile khai báo VBS/Hyper-V và chấp nhận bị thấy hypervisor |
+
+Trạng thái `HVP=0` + vendor `Microsoft Hv` là **lỗi thiết kế**, không phải một tùy chọn.
 
 ### 3.2 SMBIOS / DMI
 
@@ -188,7 +198,7 @@ Lưu ý: `DmiREAD` hỗ trợ magic `"<EMPTY>"` → empty string và `"<DmiSyste
 | 7.3 | Generated ACPI OEM Table ID cố định | `DevACPI.cpp:4680-4687` (`AcpiOemTabId` default `"VBOX"` → `"A M I "`), `:2918-2931` (`acpiR3PrepareHeader`) | OEM Table ID = `au8OemCustTabId` + signature → stock ra `VBOXAPIC`, `VBOXHPET`, `VBOXMCFG`. Đổi prefix thành `"A M I "` |
 | 7.3b | SSDT CPU (`VBOXCPUT`) | `src/VBox/Devices/PC/ACPI/VBoxAcpi.cpp:91`, `:146` | `RTAcpiTblCreate(&hAcpiTbl, ACPI_TABLE_HDR_SIGNATURE_SSDT, 1, "VBOX  ", "VBOXCPUT", 2, "VBOX", RTBldCfgRevision());` |
 | 7.4 | ACPI PM `VenDevId` override | `DevACPI.cpp:4881-4882` | Stock `8086:7113`; key `VenDevId` = (VID<<16)\|DID |
-| 8.1 | Embedded DSDT rebrand | `src/VBox/Devices/PC/vbox.dsl:28` | `DefinitionBlock ("DSDT.aml", "DSDT", 2, "VBOX  ", "VBOXBIOS", 2)` → `"ACRSYS","ACRPRDCT"` |
+| 8.1 | Embedded DSDT rebrand | `src/VBox/Devices/PC/vbox.dsl:28` | `DefinitionBlock ("DSDT.aml", "DSDT", 2, "VBOX  ", "VBOXBIOS", 2)` → fork target `"ACRSYS","ACRPRDCT"`; plan dùng build-time family, không mặc định ACRSYS |
 | 8.2 | Battery `_BIF` debrand | `vbox.dsl:1491-1495` (`PBIF`), `:1505-1529` (`_BIF`) | `"VBOX","innotek"` → `"i2battery","INTEL"` |
 | 8.3 | DSDT `\_PR.CPU0` | `vbox.dsl` (thêm mới) | `Processor (CPU0, 0, 0x410, 6)` |
 | 8.4 | DSDT ThermalZone `CCD_` | `vbox.dsl` (thêm mới) | `_STR="CPU Thermal Zone"`, `_TMP=0x0C44` (3140 = 40.85 °C), `_CRT=0x0E92`, `_HOT=0x0E10`, `_PSV=0x0DC0`, `_STA=0x0F`, `_PSL -> \_PR.CPU0`, `_TC1=4`, `_TC2=3`, `_TSP=50`, `_TZP=0` |
@@ -202,14 +212,14 @@ Lưu ý: `DmiREAD` hỗ trợ magic `"<EMPTY>"` → empty string và `"<DmiSyste
 | § | Hook | File:line | Ghi chú |
 |---|---|---|---|
 | 9.1 | MPS rebrand | `src/VBox/Devices/PC/DevFwCommon.cpp:1128-1133` | `"VBOXCPU "` → `"INTELCPU"`, `"VirtualBox  "` → `"Intel       "` |
-| 10.1 | PC BIOS AMI branding | `src/VBox/Devices/PC/BIOS/orgs.asm:86-87` (`BIOS_COPYRIGHT 'Oracle VirtualBox BIOS'`, `BIOS_BUILD_DATE '06/23/99'`); `BIOS/bios.c:74`; `BIOS/logo.c:477` | Target: `American Megatrends V3.10`, ROM tail `AMI BIOS` tại `0xFF00`, build date `23/08/22` tại `0xFFF5` |
+| 10.1 | PC BIOS AMI branding | `src/VBox/Devices/PC/BIOS/orgs.asm:86-87` (`BIOS_COPYRIGHT 'Oracle VirtualBox BIOS'`, `BIOS_BUILD_DATE '06/23/99'`); `BIOS/bios.c:74`; `BIOS/logo.c:477` | Fork target: `American Megatrends V3.10`, ROM tail `AMI BIOS` tại `0xFF00`, build date `23/08/22` tại `0xFFF5`; plan chọn build-time family sau O4 |
 | 10.2 | **Leak:** F12 boot menu | `BIOS/logo.c:477`; `BIOS/VBoxBiosAlternative8086.asm:1271`; `…386.asm:1537`; `…286.asm:1300` | `printf("\nVirtualBox temporary boot device selection\n\n…")` — residual fingerprint |
 | 10.2b | Version banner trong ROM | `VBoxBiosAlternative8086.asm:1285`, `…386.asm:1568`, `…286.asm:1314` | `db 'VirtualBox 7.2.22', 000h` |
-| 11.1 | VGA BIOS → NVIDIA VBE | `src/VBox/Devices/Graphics/BIOS/vbe.c:88-97`; `vgabios.c:99`, `:138` | `"VirtualBox VESA BIOS"` → `"NVIDIA VESA BIOS"`; `"VirtualBox VBE Display Adapter enabled"` → `"NVIDIA VBE Display Adapter enabled"`; `"Oracle VirtualBox VBE Adapter"` → `"NVIDIA Video Adapter"`. `VBOX_VENDOR`/`VBOX_PRODUCT` ở `Config.kmk:106-108` |
+| 11.1 | VGA BIOS VBE vendor (fork target NVIDIA) | `src/VBox/Devices/Graphics/BIOS/vbe.c:88-97`; `vgabios.c:99`, `:138` | Fork target: `"VirtualBox VESA BIOS"` → `"NVIDIA VESA BIOS"`; `"VirtualBox VBE Display Adapter enabled"` → `"NVIDIA VBE Display Adapter enabled"`; `"Oracle VirtualBox VBE Adapter"` → `"NVIDIA Video Adapter"`. Plan dùng build-time family, không per-VM; `VBOX_VENDOR`/`VBOX_PRODUCT` ở `Config.kmk:106-108` |
 | 11.1b | VGA BIOS flattened | `Graphics/BIOS/VBoxVgaBiosAlternative{8086,386,286}.asm` | `8086.asm:9369, 9372, 9375, 8447`; `386.asm:8667, 8679`; `286.asm:9215, 9221, 9227, 8293` |
 | 11.2 | **Leak:** raw VGA ROM build path | `Graphics/BIOS/VBoxVgaBiosAlternative*.asm` | `C:\Devel\Antidetect5\Personal\VirtualBox\...\VBoxVgaBios*.sym` — guest raw ROM scanner thấy được |
 | 12.1 | `EfiGuardDxe` | `src/VBox/Devices/EFI/Firmware/` (module mới) | DXE driver patch bootmgfw/winload/ntoskrnl/CI.dll. **Không thuộc scope** — cần binary DXE mới, activation semantics chưa rõ |
-| 12.4 | UEFI `FirmwareVendor=ASUS` | `src/VBox/Devices/EFI/Firmware/MdeModulePkg/MdeModulePkg.dec:1879-1881` (`PcdFirmwareVendor` = `L"EDK II"`) | Sink: `MdeModulePkg/Universal/BdsDxe/BdsEntry.c:710` → `gST->FirmwareVendor`; `OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.c:146`. ⚠ Nên override trong `OvmfPkg/OvmfPkgX64.dsc` (pattern có sẵn: `OvmfPkg/Bhyve/BhyveX64.dsc:522` override `PcdFirmwareVendor` → `L"BHYVE"`) thay vì sửa `.dec` global |
+| 12.4 | UEFI `FirmwareVendor` (fork target `ASUS`) | `src/VBox/Devices/EFI/Firmware/MdeModulePkg/MdeModulePkg.dec:1879-1881` (`PcdFirmwareVendor` = `L"EDK II"`) | Sink: `MdeModulePkg/Universal/BdsDxe/BdsEntry.c:710` → `gST->FirmwareVendor`; `OvmfPkg/SmbiosPlatformDxe/SmbiosPlatformDxe.c:146`. ⚠ Override trong `OvmfPkg/OvmfPkgX64.dsc` (pattern có sẵn: `OvmfPkg/Bhyve/BhyveX64.dsc:522` override `PcdFirmwareVendor` → `L"BHYVE"`); plan chọn build-time family, không hardcode ASUS |
 | 12.5 | RamDisk SSDT creator debrand | `src/VBox/Devices/EFI/Firmware/OvmfPkg/RamDiskDxe/` | Stock `VBOX` / `170995` → fork `INTL` / `0x20200925` |
 | 12.6 | Boot logo / BGRT image | `OvmfPkg/LogoDxe/` | BGRT **header** vẫn stock EDK2; chỉ image đổi |
 | 12.2/12.3 | TcgMor / TdTcg2* removal | `OvmfPkg/` | Feature removal, không phải cloak. **Không thuộc scope** |
@@ -229,7 +239,7 @@ Lưu ý: `DmiREAD` hỗ trợ magic `"<EMPTY>"` → empty string và `"<DmiSyste
 | 15.5 | AHCI HDD / optical model | `DevAHCI.cpp:5414-5415` | `SanDisc Extreme Pro` / `Toshiba CD-ROM` |
 | 15.6 | AHCI ATAPI INQUIRY | `DevAHCI.cpp:5436-5456` | vendor `SanDisk`, product `Extreme`, rev `1.0` |
 | 15.7 | HostDVD inquiry fallback | `src/VBox/Devices/Storage/DrvHostDVD.cpp:366-368` | `VBOX/CD-ROM/1.0` → `Hitachi/CD-ROM/1.0` |
-| 15.8 | VSCSI SBC/MMC vendor | `src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp:248-250`; `VSCSILunMmc.cpp:1146-1148`; `VSCSILunSsc.cpp:152-153` | **Fork giữ stock** `VBOX` — dùng làm Phase 6 coherence fix |
+| 15.8 | VSCSI SBC/MMC vendor | `src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp:248-250`; `VSCSILunMmc.cpp:1146-1148`; `VSCSILunSsc.cpp:152-153` | **Fork giữ stock** `VBOX` — xử lý ở coherence gate của PR-3 |
 | 15.9 | VSCSI SBC MODE SENSE(6) | `VSCSILunSbc.cpp` | Stock `08 0A 04` → fork `08 12 04` |
 | 16.1 | USB HID VID rebrand | `src/VBox/Devices/Input/UsbKbd.cpp:125-127`, `:326-329`, `:567-568`; `src/VBox/Devices/Input/UsbMouse.cpp:65-69`, `:351-355`, `:1194-1249` | `0x80EE` → `0x3938`, giữ PID `0010/0011/0020..0023` |
 | 16.2 | USB HID descriptor override | `UsbKbd.cpp` / `UsbMouse.cpp` | Key mới `VenDevId` (VID<<16\|PID), `Manufacturer` (max 0x40), `Product` (max 0x40) |
@@ -238,19 +248,21 @@ Lưu ý: `DmiREAD` hỗ trợ magic `"<EMPTY>"` → empty string và `"<DmiSyste
 | 16.5 | USB MSD rebrand | `src/VBox/Devices/Storage/UsbMsd.cpp:59-61`, `:282-284`, `:547-602` | VID `3938`, manufacturer `Seagate`, giữ PID `0030/0031`, product `USB Harddisk` / `USB CD-ROM` |
 | 17.1 | OHCI `VenDevId` override | `src/VBox/Devices/USB/DevOHCI.cpp:6001-6005` | Stock `106B:003F` + key override |
 | 17.2 | xHCI PantherPoint DID | `src/VBox/Devices/USB/DevXHCI.cpp:8052` | `8086:1E31` → `8086:8D31`. LynxPoint `:8050` (`0x8C31`) giữ stock, Renesas `:8041-8043` giữ stock |
-| 17.3 | i440FX root bridge | `src/VBox/Devices/Bus/DevPCI.cpp:1353-1355` | `8086:1237` → `0400:1237` |
-| 17.4 | PIIX3 ISA bridge | `DevPCI.cpp:1365-1366` | `8086:7000` → `8086:0484` |
-| 17.5 | **VMMDev rebrand** | `src/VBox/Devices/VMMDev/VMMDev.cpp:4844-4847` | `80EE:CAFE` → `8086:1551`. High-signal: khớp GA driver rename |
+| 17.3 | i440FX root bridge | `src/VBox/Devices/Bus/DevPCI.cpp:1353-1355` | **Giữ stock** `8086:1237`; profile phải hợp với chipset. Không dùng `0400:1237` (không phải AMD) |
+| 17.4 | PIIX3 ISA bridge | `DevPCI.cpp:1365-1366` | **Giữ stock** `8086:7000`; không dùng `8086:0484` (không phải PIIX3) |
+| 17.5 | **VMMDev rebrand** | `src/VBox/Devices/VMMDev/VMMDev.cpp:4844-4847` | **Binding identity** — mặc định giữ `80EE:CAFE`. Chỉ đổi toàn cục cùng lúc với GA + ký lại; không random theo profile |
 | 17.6 | `PciDevId` | — | **INERT** — không port |
-| 18.1 | VirtIO shared vendor rewrite | `src/VBox/Devices/VirtIO/VirtioCore.h:261` (`DEVICE_PCI_VENDOR_ID_VIRTIO 0x1AF4`); `VirtioCore.cpp:3073-3084` | `0x10EC` cho cả vendor **và** subsystem vendor |
-| 18.2 | virtio-net Realtek DID selector | `src/VBox/Devices/Network/DevVirtioNet.cpp:3698-3705` | `u16_le(MAC[4], MAC[5]) % 11` → `8187, 8993, 7185, 7212, 5633, 7560, 7890, 6012, 6456, 7881, 5504` |
-| 18.4 | VirtIO-SCSI leak | `VirtioCore.cpp:3073-3084` | Dùng chung core → `10EC:1048`. Sửa ở Phase 6 |
-| 18.5 | E1000 index-0 subsystem spoof | `src/VBox/Devices/Network/DevE1000.cpp:267-281` (`g_aChips[]`) | 82540EM ss `8086:001E` → `85F0:1043` |
-| 18.6 | E1000 EEPROM patch | `DevE1000.cpp:706-717` | `m_au16Data[0x0B]` (SID) / `[0x0C]` (SVID) → `1043` / `85F0`. ⚠ thứ tự field lệch với PCI config |
+| 18.1 | VirtIO shared vendor rewrite | `src/VBox/Devices/VirtIO/VirtioCore.h:261` (`DEVICE_PCI_VENDOR_ID_VIRTIO 0x1AF4`); `VirtioCore.cpp:3073-3084` | **Không port mặc định** — phá driver binding của virtio; chỉ mở nhánh experimental |
+| 18.2 | virtio-net Realtek DID selector | `src/VBox/Devices/Network/DevVirtioNet.cpp:3698-3705` | **Không port mặc định** — Realtek VID + virtio caps là fingerprint mạnh |
+| 18.4 | VirtIO-SCSI leak | `VirtioCore.cpp:3073-3084` | Không còn nếu 18.1 bị loại khỏi baseline |
+| 18.5 | E1000 index-0 subsystem spoof | `src/VBox/Devices/Network/DevE1000.cpp:267-281` (`g_aChips[]`) | 82540EM ss `8086:001E` → `1043:85F0` (SVID:SID), không phải `85F0:1043` |
+| 18.6 | E1000 EEPROM patch | `DevE1000.cpp:706-717` | `m_au16Data[0x0B]` (SID) / `[0x0C]` (SVID) → `85F0` / `1043`; phải verify endian/order với PCI config |
 | 18.7 | E1000 82583V removal | `DevE1000.cpp:252-255`, `:280` | **Không port** (feature removal, tạo fingerprint riêng) |
 | 19.2 | TPM2 manufacturer/vendor/firmware | `src/libs/libtpms-0.10.2/src/tpm2/VendorInfo.c:71-77` | `MANUFACTURER "IBM"`→`"INTC"`; `"SW  "/" TPM"`→`"CSME"/"PTT "`; `FIRMWARE_V1/V2` `0x20240125/0x00120000`→`0x01930001/0` |
 | 19.3 | TPM failure-mode endian | `VendorInfo.c` + `PropertyCap.c:107-136` | `CTNI/EMSC/ TTP` — fork bug. **Cân nhắc sửa luôn** (coherence) |
-| 19.4/19.5 | libtpms stale lineage + PCR properties | `src/libs/libtpms-0.10.2/src/tpm2/PCR.c:1205-1207`; `TpmTypes.h:650-669` | `TPM_PT_PCR_RESET_L3` bitmap `00 00 81` vs stock `00 00 F1`; `TPM_PT_PCR_POLICY`/`AUTH` `00 00 70` vs `00 00 00`. **Yêu cầu nâng libtpms** — scope lớn |
+| 19.4/19.5 | libtpms stale lineage + PCR properties | `src/libs/libtpms-0.10.2/src/tpm2/PCR.c:1205-1207`; `TpmTypes.h:650-669` | `TPM_PT_PCR_RESET_L3` bitmap `00 00 81` vs stock `00 00 F1`; `TPM_PT_PCR_POLICY`/`AUTH` `00 00 70` vs `00 00 00`. **Yêu cầu nâng libtpms** — scope lớn, tách PR riêng |
+
+**Phân loại bắt buộc:** `17.5` VMMDev, `13.1` VGA/WDDM và toàn bộ `18.x` VirtIO là **binding identity**. Không được random các ID này theo profile. Quy tắc chi tiết ở [§4.5.8](#458-phân-loại-identity-theo-driver-binding).
 
 ### 3.6 Guest Additions camouflage
 
@@ -266,9 +278,10 @@ Lưu ý: `DmiREAD` hỗ trợ magic `"<EMPTY>"` → empty string và `"<DmiSyste
 | — | `VBoxMouse.sys` | `src/VBox/Additions/win/Mouse/NT5/VBoxMouse.inf:55,76` (fork không đổi) |
 
 **Cảnh báo tương thích:** đổi tên GA là **breaking change** cho:
-- `VBoxGuest.inf` `PCI\VEN_80ee&DEV_cafe` — phải đổi theo VMMDev `8086:1551`
+- `VBoxGuest.inf` `PCI\VEN_80ee&DEV_cafe` — chỉ đổi nếu VMMDev ID đổi **toàn cục** và GA được build + ký lại trong cùng PR. Mặc định **giữ `80EE:CAFE`**.
 - Host `VBoxGuestPropSvc` / `VBoxGuestControlSvc` / `VBoxSharedFolders` / `VBoxSharedClipboard` / `VBoxDragAndDropSvc` / `VBoxHostChannel` — 6 service DLL, tên file giữ nguyên trong fork (xem §59.1 coverage matrix)
 - `VBoxCertUtil` + certificate bundle
+- Chữ ký driver: Windows 10/11 + Secure Boot cần Microsoft ký (WHQL/attestation); đổi tên file `.sys`/INF mà không ký lại sẽ không load.
 
 ### 3.7 Control plane / provisioning
 
@@ -335,11 +348,11 @@ VBoxInternal/USB/HidMouse/0/Config/Manufacturer
 
 ### 4.3 Ba hạng mục phải làm thêm so với fork
 
-**(a) Whitelist CFGM.** Mỗi device có `PDMDEV_VALIDATE_CONFIG_RETURN` — key không có trong whitelist sẽ bị reject (device fail to construct).
+**(a) Whitelist CFGM + code đọc key.** Mỗi device có `PDMDEV_VALIDATE_CONFIG_RETURN` — key không có trong whitelist sẽ bị reject (device fail to construct). Key mới (e.g. `DmiMemDev`, `GpuModelId`) còn phải được device **đọc và dùng**; thêm whitelist một mình không đủ.
 
 | File | Dòng whitelist | Cần thêm |
 |---|---|---|
-| `src/VBox/Devices/PC/DevPcBios.cpp` | `1404-1468` | `DmiMemDev`, `DmiPortConnectors`, `Flags`, `VenDevId` |
+| `src/VBox/Devices/PC/DevPcBios.cpp` | `1404-1468` | `DmiMemDev`, `DmiPortConnectors`, `VenDevId` (`Flags` legacy → `/Cloak/Enabled`) |
 | `src/VBox/Devices/EFI/DevEFI.cpp` | `1523-1574` | (mirror pcbios) |
 | `src/VBox/Devices/PC/DevACPI.cpp` | `4360-4389` | `VenDevId` |
 | `src/VBox/Devices/Graphics/DevVGA.cpp` | `s_szMscWorkaround[]` (`:6646-6693`) | `GpuModelId` |
@@ -347,12 +360,10 @@ VBoxInternal/USB/HidMouse/0/Config/Manufacturer
 | `src/VBox/Devices/USB/DevOHCI.cpp` | | `VenDevId` |
 | `src/VBox/Devices/Storage/DevAHCI.cpp` | | `VenDevId` |
 
-**(b) Rewrite path pcbios ↔ efi.** `i_configCfgmOverlay` không biết VM dùng BIOS hay EFI. Fork có "firmware path map" (`/pcbios/` ↔ `/efi/`). Cần 1 bước trong `ConsoleImplConfigCommon.cpp:724-843`:
+**(b) Chọn đúng node firmware.** `i_configCfgmOverlay` không biết VM dùng BIOS hay EFI. Fork có "firmware path map" (`/pcbios/` ↔ `/efi/`). Trong thiết kế mới, **MPE** biết firmware mode và materialize trực tiếp vào `Devices/pcbios/...` hoặc `Devices/efi/...`; không cần bước rewrite toàn cục.
 
-- nếu VM dùng EFI → `Devices/pcbios/0/Config/*` chuyển thành `Devices/efi/0/Config/*`
-- nếu VM dùng BIOS → ngược lại
-
-→ 1 profile DMI áp dụng cho cả 2 firmware mode.
+- Nếu vẫn muốn map path ở overlay: chỉ áp dụng cho key runtime, thực hiện trong **PR-2**, không phải PR-1.
+- Một profile DMI có thể dùng cho cả 2 firmware mode bằng cách chọn node đích, không copy giá trị qua lại.
 
 **(c) Cổng `Flags` chống lạm dụng.** Fork dùng `Flags & 0x1337` như license gate. Nếu port nguyên xi thì bất kỳ ai cũng set được. Đề xuất: dùng một cờ riêng (ví dụ `CloakEnabled`) và **không** bật mặc định — để người dùng chủ động bật.
 
@@ -362,7 +373,7 @@ VBoxInternal/USB/HidMouse/0/Config/Manufacturer
 |---|---|
 | `include/VBox/VBoxGuest.h` COM interface (trừ hằng tên service) | Giữ ABI |
 | `src/VBox/Main/idl/*.idl` | Giữ TypeLib hash → SDK cũ vẫn chạy |
-| `src/VBox/Main/src-client/ConsoleImplConfigX86.cpp` (trừ overlay rewrite) | Không cần `InsertConfigString` mới |
+| `src/VBox/Main/src-client/ConsoleImplConfigX86.cpp` (trừ overlay rewrite + điểm gọi MPE sau `i_configCfgmOverlay`) | Không cần `InsertConfigString` mới; MPE materialize qua CFGM, không thêm chuỗi trực tiếp |
 | `Config.kmk` `VBOX_VENDOR` / `VBOX_PRODUCT` | Đổi sẽ ảnh hưởng toàn bộ string sản phẩm + licensing. Sửa cục bộ trong `vbe.c` / `vgabios.c` |
 | `VBoxC` HGCM service names | 6 service DLL giữ nguyên; đổi sẽ phá tương thích guest |
 
@@ -372,26 +383,37 @@ VBoxInternal/USB/HidMouse/0/Config/Manufacturer
 
 #### 4.5.1 Vấn đề cần giải
 
-Yêu cầu: **mọi thông tin identity phải đồng bộ với nhau**. Ví dụ một máy phải là "máy Intel đời 8xx, chipset Intel, firmware AMI, GPU NVIDIA, NIC Intel, storage Samsung" — không được trộn `0400:1237` (AMD) với xHCI Intel đời 9xx, không được có BIOS AMI nhưng ACPI OEM ID `ASUS`.
+Yêu cầu: **mọi thông tin identity phải đồng bộ với nhau**. Ví dụ một máy phải là "máy Intel đời 8xx, chipset Intel, firmware AMI, GPU NVIDIA, NIC Intel, storage Samsung" — không được trộn CPU AMD với i440FX `8086:1237` (Intel), hoặc BIOS AMI nhưng ACPI OEM ID `ASUS` **khi tổ hợp đó không có nguồn/allowlist** (C3 là heuristic, không phải equality tuyệt đối).
 
 Cách fork làm: **vá từng literal riêng lẻ** → tạo ra chính những mâu thuẫn mà tài liệu §48.1 liệt kê.
 
-Cách ta làm: **một nguồn sự thật duy nhất** — `MachineProfile`. Mọi giá trị đều do profile sinh ra, không có giá trị nào hard-code rời rạc.
+Cách ta làm: **profile là nguồn mặc định, effective CFGM là nguồn sự thật cuối** — MPE materialize từ `MachineProfile`, nhưng `validateEffectiveConfig()` kiểm tra toàn bộ giá trị CFGM sau khi user override. Asset build-time (DSDT/BIOS/VGA/OVMF) được ràng buộc bằng `BUILDIDENTITYMANIFEST`, không do MPE materialize.
 
 #### 4.5.2 Vị trí đặt MPE
 
 | Thành phần | Vị trí đề xuất | Lý do |
 |---|---|---|
-| Engine + profile registry | `src/VBox/Main/src-client/ConsoleImplConfigCloak.cpp` / `.h` (file mới) | Chạy 1 lần, 1 nơi, trước khi device construct |
-| Điểm gọi | `Console::i_configConstructorX86()` (`ConsoleImplConfigX86.cpp:383`), ngay **trước** `i_configCfgmOverlay()` (đang gọi ở `:2055`) | Overlay ghi đè giá trị sau → engine phải chạy trước, hoặc engine ghi sau overlay (xem 4.5.5) |
-| Ghi kết quả | CFGM node, qua `InsertConfigString/Integer` vào node `Devices/<dev>/0/Config` | Device chỉ cần đọc key → không cần sửa logic device nhiều |
-| Device | Đọc CFGM key như hiện tại | Tái dùng cơ chế stock, không thêm code path mới |
+| Engine + profile registry | `src/VBox/Main/src-client/ConsoleImplConfigCloak.cpp` / `.h` (file mới) | Chạy 1 lần, 1 nơi, sau overlay và trước khi device construct |
+| Điểm gọi | `Console::i_configConstructorX86()` — **ngay sau** `i_configCfgmOverlay()` (`ConsoleImplConfigX86.cpp:2055`) | Overlay đã ghi giá trị user; MPE chỉ điền chỗ trống, không đè override |
+| Control plane | Root CFGM `/Cloak/...` (từ ExtraData `VBoxInternal/Cloak/...`) | Không nằm dưới `/Devices` nên PDM không coi là device |
+| Ghi kết quả | CFGM node thật `Devices/<dev>/0/Config/<key>` | Device đọc key như stock; key mới phải thêm code đọc + test |
+| Validate cuối | `validateEffectiveConfig()` sau materialize, trước device construct | Bắt conflict do user override; không đè override |
+| State guard | So seed/profile/manifest hash khi restore saved state/snapshot | Không trộn identity; mismatch fail rõ (xem §4.6.5) |
+| Build contract | `BUILDIDENTITYMANIFEST` nhúng từ build | Profile không thể “khai” firmware/tính năng build không có |
+| Device | Đọc CFGM key như hiện tại | Tái dùng cơ chế stock; không thêm device mới |
 
 **Quyết định quan trọng:** MPE **không** sống trong VBoxDD. Nếu đặt ở VBoxDD thì mỗi device tự sinh giá trị → mất tính đồng bộ và mất tính ổn định (xem 4.6).
 
 #### 4.5.3 Cấu trúc `MachineProfile`
 
 ```c
+typedef enum CLOAKPROFILECLASS
+{
+    CLOAKPROFILE_DRAFT = 0,
+    CLOAKPROFILE_RESEARCH_ONLY,
+    CLOAKPROFILE_COMPATIBLE
+} CLOAKPROFILECLASS;
+
 typedef struct MACHINEPROFILE
 {
     /* --- Identity nhà sản xuất / hệ điều hành --- */
@@ -400,45 +422,49 @@ typedef struct MACHINEPROFILE
     const char *pszSystemVersion;     /* "1.0"                       */
     const char *pszSystemFamily;      /* "ThinkPad T14 Gen 2"       */
     const char *pszSystemSKU;
+    const char *pszSystemSerial;      /* DMI Type 1 serial           */
     const char *pszBiosVendor;        /* "LENOVO"                    */
     const char *pszBiosVersion;       /* "N2HET52W (1.50)"          */
-    const char *pzszBiosReleaseDate;  /* "20230201"                 */
+    const char *pszBiosReleaseDate;   /* "20230201"                 */
     const char *pszBoardVendor;       /* "LENOVO"                    */
     const char *pszBoardProduct;      /* "20XW004VGE"                */
+    const char *pszBoardSerial;       /* DMI Type 2 serial           */
     const char *pszChassisVendor;     /* "LENOVO"                    */
     const char *pszChassisType;       /* "Notebook"                 */
+    const char *pszChassisSerial;     /* DMI Type 3 serial           */
     const char *pszProcManufacturer;  /* "GenuineIntel"             */
 
     /* --- Firmware / ACPI --- */
     const char *pszAcpiOemId;         /* "LENOVO"                   */
-    const char *pszAcpiCreatorId;     /* "AMI "                     */
-    const char *pszAcpiOemTabId;      /* "A M I "                   */
-    const char *pszMpsOemId;          /* "INTELCPU"                 */
-    const char *pszMpsProductId;      /* "Intel       "             */
-    const char *pszAcpiDmiOemId;      /* OEM ID của DSDT: "ACRSYS"   */
-    const char *pszAcpiDmiOemTabId;   /* "ACRPRDCT"                 */
-    const char *pszBiosRomVendor;     /* "American Megatrends..."   */
+    const char *pszAcpiCreatorId;     /* profile-derived            */
+    const char *pszAcpiOemTabId;      /* profile-derived            */
+    const char *pszMpsOemId;          /* profile-derived            */
+    const char *pszMpsProductId;      /* profile-derived            */
+    const char *pszAcpiDmiOemId;      /* profile-derived; không ACRSYS mặc định */
+    const char *pszAcpiDmiOemTabId;   /* profile-derived            */
+    const char *pszBiosRomVendor;     /* build-time family          */
 
     /* --- CPU --- */
-    const char *pszGuestCpuName;      /* "i7-9750H"                 */
-    const char *pszCpuBrandString;    /* "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz" */
+    const char *pszGuestCpuName;      /* "i7-1165G7"                */
+    const char *pszCpuBrandString;    /* "Intel(R) Core(TM) i7-1165G7 CPU @ 2.80GHz" */
 
-    /* --- Chipset (phải cùng đời với CPU) --- */
+    /* --- Chipset (phải cùng đời với CPU; xem O5) --- */
     uint16_t    uI440FxVendorId;      /* 0x8086                     */
-    uint16_t    uI440FxDeviceId;      /* 0x1237                     */
-    uint16_t    uPiix3IsaDeviceId;    /* 0x7000 → 0x0484            */
-    uint16_t    uXhciDeviceId;        /* 0x8D31                     */
-    uint16_t    uAhciDeviceId;        /* 0x8C82                     */
+    uint16_t    uI440FxDeviceId;      /* 0x1237 — stock, không fake  */
+    uint16_t    uPiix3IsaDeviceId;    /* 0x7000 — stock, không fake  */
+    uint16_t    uXhciDeviceId;        /* profile-derived, verify     */
+    uint16_t    uAhciDeviceId;        /* profile-derived, verify     */
     uint16_t    uAcpiPmDeviceId;      /* 0x7113                     */
     uint16_t    uHdaDeviceId;         /* 0x2668                     */
-    uint16_t    uOhciDeviceId;        /* 0x003F                     */
+    uint16_t    uOhciDeviceId;        /* profile-derived, verify     */
 
     /* --- GPU --- */
-    uint64_t    uGpuModelId;          /* VID<<48|DID<<32|SVID<<16|SID */
-    const char *pszVbeVendor;         /* "NVIDIA Corporation"       */
-    const char *pszVbeProduct;        /* "NVIDIA Video Adapter"     */
+    uint64_t    uGpuModelId;          /* VID<<48|DID<<32|SVID<<16|SID; binding-aware */
+    const char *pszVbeVendor;         /* build-time; validate C4, không materialize */
+    const char *pszVbeProduct;        /* build-time; validate C4    */
     const char *pszEdidManufacturer;  /* "DEL" / "SAM" / "BNQ"      */
     const char *pszEdidModel;
+    const char *pszEdidSerial;
 
     /* --- Storage --- */
     const char *pszAtaModel;          /* "Samsung PRO 970"          */
@@ -446,6 +472,7 @@ typedef struct MACHINEPROFILE
     const char *pszAtapiProduct;      /* "CD-ROM"                   */
     const char *pszInquiryVendor;     /* "Samsung"                  */
     const char *pszInquiryProduct;    /* "Extreme"                  */
+    const char *pszStorageSerial;     /* serial ổ đĩa/ata/ahci       */
     uint8_t     uNonRotational;       /* 1 nếu SSD                  */
     uint8_t     fTrimSupported;       /* 1 nếu discard              */
     uint8_t     fSmartSupported;      /* 1 nếu SMART                */
@@ -468,63 +495,140 @@ typedef struct MACHINEPROFILE
     /* --- Battery (ACPI _BIF) --- */
     const char *pszBatteryType;       /* "i2battery"                */
     const char *pszBatteryOem;        /* "INTEL"                    */
+
+    /* --- Binding identity: build-level, phải khớp GA --- */
+    uint16_t    uVmmDevVendorId;      /* 0x80EE — mặc định giữ      */
+    uint16_t    uVmmDevDeviceId;      /* 0xCAFE — mặc định giữ      */
+
+    /* --- Compatibility / build manifest --- */
+    CLOAKPROFILECLASS enmClass;       /* COMPATIBLE/RESEARCH_ONLY   */
+    uint32_t    fSupportedChipsets;   /* i440fx | piix3 | ich9      */
+    const char *pszRequiredFirmwareFamily; /* khớp manifest          */
+    const char *pszSourceModel;       /* model máy thật             */
+    const char *pszSourceBiosDate;    /* ngày BIOS nguồn            */
+    const char *pszProvenanceHash;    /* hash dump nguồn            */
 } MACHINEPROFILE;
 ```
 
 #### 4.5.4 Profile registry
 
-Bắt đầu với **3 profile đầy đủ** (đủ để test cả 3 nhánh CPU Intel / CPU AMD / GPU NVIDIA):
+**Trạng thái registry: 0 profile production đang active.** Không đưa profile chưa kiểm chứng vào registry. Ba profile dưới đây chỉ là **candidate/DRAFT**, không được selectable cho tới khi O4 hoàn tất:
 
-| Profile | CPU | Chipset | Firmware | GPU | NIC | Storage | TPM |
-|---|---|---|---|---|---|---|---|
-| `profile-lenovo-t14` | i7-9750H (Cascade Lake) | Intel 8xx/Cannon Lake | AMI + ACPI `LENOVO` | NVIDIA GV100 | Intel I219-V | Samsung PM981 | Intel PTT |
-| `profile-dell-latitude` | i5-10400 (Comet Lake) | Intel 4xx/Comet Lake | Phoenix | Intel UHD 630 | Intel I219-LM | SK Hynix PC801 | Intel PTT |
-| `profile-amd-ryzen-t14` | Ryzen 7 PRO 6850U | AMD Zen 3 | Phoenix | AMD Raphael | Realtek RTL8168 | Micron 2450 | MSFT |
+| Candidate ID | Họ máy | Dữ liệu bắt buộc phải verify | Class | Trạng thái |
+|---|---|---|---|---|
+| `profile-lenovo-t14-g2-intel` | ThinkPad T14 Gen 2 Intel — Tiger Lake 11th gen (i5-1135G7/i7-1165G7), MX450 tùy cấu hình | SKU, BIOS/EC, SMBIOS, ACPI, PCI, EEPROM, EDID, storage | chưa phân loại | `DRAFT` |
+| `profile-dell-latitude-5xxx` | Latitude 5xxx — 10th/11th gen U/H, không dùng CPU desktop | Model/SKU chính xác, BIOS, SMBIOS, ACPI, PCI | chưa phân loại | `DRAFT` |
+| `profile-lenovo-t14-g3-amd` | ThinkPad T14 Gen 3 AMD — Ryzen 7 PRO 6850U (Rembrandt, Zen 3+, Radeon 680M) | SKU, BIOS/EC, SMBIOS, ACPI, PCI, EEPROM | chưa phân loại | `DRAFT` |
 
-Mỗi profile là **một hàng dữ liệu literal** trong `ConsoleImplConfigCloak.cpp`. Thêm profile mới = thêm 1 hàng.
+**Phân loại profile (bắt buộc trước khi selectable):**
 
-**Quy tắc bắt buộc khi thêm profile:** không được tự ý ghép giá trị. Mỗi profile phải là một cấu hình máy thật (hoặc mô phỏng sát 1 máy thật).
+| Class | Vai trò | Điều kiện |
+|---|---|---|
+| `COMPATIBLE` | Production: device model, firmware family và identity công bố tương thích | Provenance đầy đủ + manifest khớp + không có STRICT violation + device feasibility đã test |
+| `RESEARCH_ONLY` | Đo sai khác, thử nghiệm | Có residual đã biết; **không selectable** cho production/release |
+| `DRAFT` | Chưa đủ dữ liệu | Không selectable; chỉ lint offline |
+
+**Các giá trị sai đã bị loại khỏi plan:**
+- i7-9750H là Coffee Lake Refresh 9th gen, **không phải** Cascade Lake; không dùng trong T14 Gen 2.
+- T14 Gen 2 Intel là Tiger Lake 11th gen, **không phải** i7-9750H + GV100.
+- GV100 là GPU Volta datacenter/workstation, không có trong laptop T14.
+- Ryzen 7 PRO 6850U là Rembrandt/Zen 3+/Radeon 680M, **không phải** Phoenix hay Raphael.
+- i5-10400 là CPU desktop Comet Lake LGA1200, không dùng cho Latitude laptop.
+- `0400:1237`, `8086:0484`, `85F0:1043`, `10EC:1048` là các tuple sai/không coherent; xem §3.5 và §4.5.8.
+
+**Quy tắc bắt buộc khi thêm profile:**
+1. Mỗi field phải có nguồn thật: dump `dmidecode`/`acpidump`/`lspci -nnvv`/`smartctl`/`ethtool -e`/EDID, kèm model + BIOS version + ngày.
+2. Không ghép field từ nhiều máy. Không suy đoán CPU/chipset/GPU.
+3. Phân loại `COMPATIBLE`/`RESEARCH_ONLY`; chỉ `COMPATIBLE` được selectable ở runtime. Registry linter từ chối `DRAFT` và `RESEARCH_ONLY` trong production.
+4. `COMPATIBLE` phải chứng minh **device feasibility**: chipset VirtualBox hỗ trợ, firmware family khớp build manifest, binding ID khớp driver, không có STRICT violation.
+5. Nếu không tìm được profile laptop hợp với chipset VirtualBox đang mô phỏng, chuyển sang profile desktop/workstation hoặc ghi nhận residual — xem O5. Profile chỉ “đúng trên giấy” nhưng không chạy được trên device model phải là `RESEARCH_ONLY`.
+6. Phase 1.0 chỉ dùng `test-profile-synthetic` trong unit test.
+
+Mỗi profile production là **một hàng dữ liệu literal** trong `ConsoleImplConfigCloak.cpp`; thêm profile mới = thêm 1 hàng + nguồn chứng minh.
 
 #### 4.5.5 Thứ tự materialize
 
 ```
 i_configConstructorX86()
   │
-  ├─ [A] i_configCfgmOverlay()            ← ExtraData của user ghi đè
-  │      (ConsoleImplConfigCommon.cpp:680)
+  ├─ [A] i_configCfgmOverlay()            ← ExtraData của user
+  │      (ConsoleImplConfigCommon.cpp:680; gọi ở ConsoleImplConfigX86.cpp:2055)
+  │      → ghi /Cloak/... và /Devices/<dev>/0/Config/...
   │
-  ├─ [B] MPE: đọc ExtraData "CloakProfile" / "CloakEnabled"
-  │      ├─ nếu tắt → return (không đổi gì)
-  │      ├─ seed = f(VM UUID)  (xem 4.6)
-  │      ├─ profile = registry[ prng.pickProfile() ]
-  │      └─ materialize từng field
+  ├─ [B] MPE đọc control plane tại root CFGM:
+  │      /Cloak/Enabled, /Cloak/Profile, /Cloak/Seed
+  │      ├─ nếu tắt → return, không materialize
+  │      ├─ seed = KDF(CloakSeed, VM UUID)  (xem 4.6)
+  │      └─ profile = registry[prng.pickProfile()]
   │
-  └─ [C] MPE ghi đè CFGM: InsertConfigString/Integer vào node lưu trữ
-         (CHỈ ghi đè field mà user KHÔNG chỉ định trong ExtraData)
+  ├─ [C] MPE materialize vào node THẬT:
+  │      /Devices/<dev>/0/Config/<key>
+  │      (chỉ set nếu key CHƯA tồn tại → user overlay thắng)
+  │
+  └─ [D] validateEffectiveConfig() đọc CFGM THỰC TẾ sau materialize
+         → effective identity = profile + user override
+         → strict conflict: fail; heuristic conflict: warn + residual
 ```
 
-**Thứ tự A → B → C** (không phải B → A): nếu MPE ghi trước overlay thì ExtraData của user bị MPE đè mất. Với thứ tự A → B → C, MPE phải **kiểm tra** xem user đã set key đó chưa, và nếu có thì **không** ghi đè → user vẫn override được.
+**Thứ tự bắt buộc A → B → C → D.** MPE chạy **sau** overlay và **trước** device construction. Với mỗi key, MPE dùng `CFGMR3Query*` để kiểm tra; nếu user đã set thì bỏ qua. Không đọc lại ExtraData lần hai.
 
-Cơ chế: MPE đọc lại ExtraData (như `i_configCfgmOverlay` đang làm ở `:703-722`) và so sánh; hoặc đơn giản hơn — MPE ghi vào node riêng `Devices/cloak/0/Config/*`, còn device đọc `Devices/cloak/0/Config/X` trước, fallback sang `Devices/<dev>/0/Config/X`. Cách này **không cần** thứ tự A/B/C cụ thể, và sạch hơn.
+**Vì sao cần [D]:** nếu chỉ validate `MACHINEPROFILE`, user override có thể làm cấu hình cuối mất coherent (ví dụ profile Intel nhưng user đổi ACPI OEM ID sang hãng khác) mà MPE vẫn coi profile hợp lệ. `validateEffectiveConfig()` đọc **giá trị CFGM thực tế** (không phải profile gốc), chạy lại các rule C1–C13 trên `EFFECTIVEIDENTITY`.
 
-→ **Khuyến nghị: node riêng `Devices/cloak/0/Config/*`**, device đọc theo thứ tự ưu tiên. Chi tiết ở Phase 1.0.
+Quy tắc conflict:
+- `STRICT`: fail-fast, log rõ key, giá trị profile, giá trị effective, rule bị vi phạm.
+- `HEURISTIC`: warning + ghi residual; không fail nếu không có allowlist chứng minh.
+- **Không bao giờ** âm thầm ghi đè override của user. Nếu user muốn cấu hình ngoài profile, họ phải chọn một profile `COMPATIBLE` khác hoặc tắt cloak; `RESEARCH_ONLY` chỉ dùng cho test/đo sai khác.
+- Không ghi `CloakSeed`/ExtraData từ bước này; chỉ đọc CFGM.
+
+`EFFECTIVEIDENTITY` tối thiểu gồm: DMI Type 1/2/3, ACPI OEM/creator/table ID, CPUID leaf/reg, PCI VID/DID/SVID/SDID, storage INQUIRY/flags, NIC EEPROM, EDID, TPM vendor, HVP/GIM. Đây là input cho C1–C13, không phải `MACHINEPROFILE` gốc.
+
+**Không dùng `Devices/cloak/0/Config`.** `PDMR3Device.cpp:158-202` duyệt child của `/Devices` và coi tên child là PDM device; `cloak` sẽ fail với `VERR_PDM_DEVICE_NOT_FOUND`. Control plane dùng root `/Cloak/...`; metadata không bao giờ nằm dưới `/Devices`.
+
+**Ranh giới với firmware/build-time asset:** MPE chỉ điều khiển các key runtime. DSDT, PC BIOS ROM, VGA BIOS ROM, OVMF và các literal build-time khác **không** do MPE sinh ra; xem §4.5.9.
+
+**Nghiệm thu materialize:** không dùng `VBoxManage showvminfo` (nó không đọc CFGM nội bộ). Dùng `debugvm <vm> info pci verbose` + DMI/ACPI collector trong guest; nếu cần debug nội bộ, thêm một debug-info item `cfgm` (test-only) hoặc log có kiểm soát. Nghiệm thu [D] phải chứng minh user override vẫn thắng nhưng conflict STRICT bị chặn.
 
 #### 4.5.6 Bộ luật coherence (validate lúc build-time hoặc run-time)
 
-| # | Luật | Ví dụ vi phạm |
-|---|---|---|
-| C1 | CPU đời ↔ chipset đời | CPU Core2 (model 15) + chipset 8xx |
-| C2 | chipset vendor ↔ i440FX vendor | `0400:1237` (AMD) + xHCI `8086:8D31` (Intel) |
-| C3 | ACPI OEM ID ↔ SMBIOS vendor ↔ firmware vendor | ACPI `ASUS` + SMBIOS `LENOVO` |
-| C4 | GPU vendor ↔ VBE vendor ↔ EDID manufacturer | PCI `10DE` + VBE `NVIDIA` + EDID `DEL` |
-| C5 | Storage model family ↔ INQUIRY vendor ↔ nonrotational/TRIM/SMART | Model `Samsung PRO 970` + INQUIRY `VBOX` |
-| C6 | NIC PCI subsystem ↔ EEPROM ↔ INF | PCI `85F0:1043` ↔ EEPROM `1043`/`85F0` |
-| C7 | TPM manufacturer ↔ CPU vendor | TPM `INTC` + CPU AMD |
-| C8 | HDA codec ↔ chipset đời | Codec 2003-era + chipset 8xx |
-| C9 | Storage controller ↔ chipset | AHCI `8086:8C82` (8xx) nhưng CPU Haswell (6xx) |
-| C10 | Monitor/EDID ↔ GPU | EDID panel manufacturer không khớp GPU |
+| # | Luật | Mức | Ví dụ / ghi chú |
+|---|---|---|---|
+| C1 | CPU đời ↔ chipset đời | `STRICT` nếu profile khai báo mapping; nếu không, `HEURISTIC` | CPU Core2 (model 15) + chipset 8xx; không dùng equality đơn giản |
+| C2 | chipset vendor ↔ i440FX vendor | `STRICT` | CPU AMD Ryzen + i440FX `8086:1237` (Intel); hoặc `8086:1237` + xHCI `1022:...` (AMD) |
+| C3 | ACPI OEM/creator ↔ SMBIOS/firmware | `HEURISTIC` + allowlist | ACPI `ASUS` + SMBIOS `LENOVO` chỉ fail nếu không có trong bảng tổ hợp đã chứng minh |
+| C4 | GPU PCI ↔ VBE build-time asset | `STRICT` | PCI `10DE` + VBE build `NVIDIA`; build VBE AMD + GPU NVIDIA = fail |
+| C5 | Storage model family ↔ INQUIRY ↔ nonrotational/TRIM/SMART | `STRICT` | Model `Samsung PRO 970` + INQUIRY `VBOX` |
+| C6 | NIC PCI subsystem ↔ EEPROM ↔ INF | `STRICT` | PCI `1043:85F0` ↔ EEPROM `1043`/`85F0`; sai thứ tự field |
+| C7 | TPM manufacturer ↔ CPU vendor | `HEURISTIC` | `INTC` + AMD có thể sai, nhưng dTPM ngoài cũng hợp lệ; cần allowlist |
+| C8 | HDA codec ↔ chipset đời | `HEURISTIC` | Codec 2003-era + chipset 8xx |
+| C9 | Storage controller ↔ CPU/chipset đời | `HEURISTIC` | AHCI `8086:8C82` (8-series) + CPU Tiger Lake (11th gen) |
+| C10 | Monitor/EDID ↔ display identity | `HEURISTIC` | **Không** bắt buộc EDID manufacturer trùng GPU; monitor Dell + GPU NVIDIA là hợp lệ |
+| C11 | HVP bit ↔ hypervisor vendor/leaves ↔ GIM provider | `STRICT` | HVP=0 nhưng leaf `0x40000000` trả `Microsoft Hv`; hoặc `Hidden` nhưng GIM HyperV |
+| C12 | Binding identity ↔ driver/INF | `STRICT` | VMMDev `8086:1551` nhưng `VBoxGuest.inf` vẫn `80EE:CAFE`; VGA NVIDIA ID nhưng WDDM vẫn match `80EE:BEEF` |
+| C13 | Profile provenance + class + build manifest | `STRICT` | Field không có nguồn/model/BIOS/ngày; `DRAFT`/`RESEARCH_ONLY` selectable ở production; manifest family không khớp |
 
-Luật C1–C10 được implement dưới dạng **assertion trong MPE lúc khởi tạo** (fail sớm, log rõ profile nào vi phạm) + một **bộ test offline** để lint toàn bộ profile registry.
+`STRICT` = fail-fast; `HEURISTIC` = warning + residual, không tự sửa; `INFO` = chỉ ghi nhận. Profile `COMPATIBLE` không được có `STRICT` violation; `HEURISTIC` violation phải có waiver kèm nguồn. `RESEARCH_ONLY` được phép có residual nhưng không selectable cho production.
+
+#### 4.5.6.1 Test độc lập cho từng rule
+
+Mỗi rule phải có unit test offline **và** một ca runtime tương ứng; test phải chứng minh cả positive (hợp lệ) lẫn negative (bị chặn/cảnh báo), không chỉ test một chiều:
+
+| Rule | Positive | Negative |
+|---|---|---|
+| C1 | CPU/chipset cùng thế hệ trong allowlist | CPU Core2 + chipset 8xx |
+| C2 | CPU Intel + i440FX `8086:1237` | CPU AMD + i440FX Intel |
+| C3 | Cặp Lenovo/AMI đã có nguồn | Cặp không có trong allowlist |
+| C4 | GPU NVIDIA + VBE build NVIDIA | GPU AMD + VBE build NVIDIA |
+| C5 | Samsung model + Samsung INQUIRY + SSD flags | Model Samsung + INQUIRY VBOX |
+| C6 | E1000 subsystem/EEPROM đúng thứ tự | EEPROM đảo SVID/SID |
+| C7 | Intel CPU + INTC PTT | AMD profile + TPM `INTC` không có nguồn |
+| C8 | HDA codec cùng đời chipset | Codec 2003 + chipset 8xx |
+| C9 | AHCI ID cùng đời chipset | AHCI 8-series + CPU 11th gen |
+| C10 | EDID Dell + GPU NVIDIA | EDID không có nguồn/không parse được |
+| C11 | `Hidden` + không leaves; `HyperV` + leaves | HVP=0 + `Microsoft Hv`; `Hidden` + GIM HyperV |
+| C12 | VMMDev `80EE:CAFE` + INF tương ứng | Đổi VMMDev nhưng không đổi INF/ký |
+| C13 | Profile `COMPATIBLE` + manifest khớp | `DRAFT`/`RESEARCH_ONLY` selectable; manifest mismatch |
+
+Test C1–C13 nằm trong unit test của MPE (không cần VM), chạy ở T1; các ca runtime tương ứng chạy ở T3. C12 là **blocking**: profile vi phạm không được selectable.
 
 #### 4.5.7 Phạm vi của MPE so với plan ban đầu
 
@@ -533,16 +637,99 @@ MPE **thay thế** phần lớn giá trị đích cứng trong Phase 1-2. Cụ t
 | Task cũ | Task mới |
 |---|---|
 | 1.7 đổi default DMI vendor/product | MPE `pszSystemVendor` / `pszBiosVendor` / … |
-| 1.8 ACPI OEM/Creator theo UUID | MPE `pszAcpiOemId` / `pszAcpiCreatorId` |
+| 1.8 ACPI OEM/Creator theo profile | MPE `pszAcpiOemId` / `pszAcpiCreatorId` (không random) |
 | 1.9 ACPI OEM Table ID | MPE `pszAcpiOemTabId` |
 | 1.13 MPS rebrand | MPE `pszMpsOemId` / `pszMpsProductId` |
 | 2.4-2.6 storage model | MPE `pszAtaModel` / `pszInquiryVendor` / … |
-| 2.13 i440FX + PIIX3 | MPE `uI440FxVendorId` / `uPiix3IsaDeviceId` |
-| 2.14 VMMDev | MPE `uVmmDevVendorId/DeviceId` (thêm field) |
-| 2.18 E1000 | MPE `uNicVendorId` / `uEepromSubVendor` / … |
-| 2.19 TPM | MPE `pszTpmManufacturer` / `uTpmFirmwareV1` |
+| 2.13 i440FX + PIIX3 | **Không fake**; giữ `8086:1237` / `8086:7000` trừ khi có device model mới |
+| 2.14 VMMDev | **BindingIdentity**, build-level; mặc định giữ `80EE:CAFE` |
+| 2.16/2.17 VirtIO | **Loại khỏi baseline**; không đưa vào MPE |
+| 2.18 E1000 | MPE `uNicVendorId` / `uEepromSubVendor`; tuple `1043:85F0` |
+| 2.19 TPM | MPE `pszTpmManufacturer` / `uTpmFirmwareV1`; defer PR-6 |
 
-Các task **không** nằm trong MPE (vì phụ thuộc runtime device, không phải profile tĩnh): 2.1 (GPU `GpuModelId` — có thể đưa vào MPE), 2.2 (VMSVGA caps), 2.8-2.10 (USB), 2.17 (virtio-net DID — phụ thuộc MAC).
+Các task **không** nằm trong MPE (vì phụ thuộc runtime device hoặc binding): 2.1 (GPU `GpuModelId` — chỉ dùng khi có WDDM strategy), 2.2 (VMSVGA caps), 2.8-2.10 (USB), 2.14 (VMMDev), 2.16/2.17 (VirtIO).
+
+#### 4.5.8 Phân loại identity theo driver binding
+
+Không phải mọi ID đều có thể random. Chia làm 3 lớp:
+
+| Lớp | Surface | Quy tắc |
+|---|---|---|
+| **Binding cứng** | VMMDev `80EE:CAFE` (`VBoxGuest.inf`, `VBoxGuest-linux.c`), VGA/WDDM `80EE:BEEF` (`VBoxWddm.inf:48`), VirtIO `1AF4:*` | **Build-level**. Chỉ đổi một lần toàn cục, cùng PR với driver/INF tương ứng và ký lại. Không random theo profile |
+| **Binding mềm** | AHCI/xHCI/HDA/E1000 primary ID; GPU `GpuModelId` | Chỉ chọn từ allowlist đã test với driver stock/WHQL; profile linter kiểm tra. Nếu không chắc, giữ stock |
+| **Cosmetic** | Subsystem ID, DMI/ACPI string, serial, EDID, UUID, MAC OUI | Có thể random theo VM; không được làm đổi driver binding |
+
+Quy tắc tuyệt đối:
+
+1. `VMMDev` và `VGA` primary ID **không** là field random của profile; nếu profile chứa giá trị khác build-level thì linter từ chối.
+2. `VirtIO` vendor `1AF4` là contract của driver virtio; đổi sang `10EC` phá Linux `virtio_pci` và Windows NetKVM/viostor. **Không port mặc định.**
+3. Mọi thay đổi binding cứng phải có test: Windows PnP không yellow-bang + GA service chạy; Linux `dmesg` không lỗi probe + `lspci -k` thấy driver đúng.
+4. Đổi GA driver/INF mà không ký lại là **không hợp lệ** trên Windows 10/11 + Secure Boot.
+
+#### 4.5.9 Build-time asset và nghĩa của `CloakEnabled=off`
+
+`CloakEnabled=off` **không** làm binary trở lại stock. Phân lớp rõ:
+
+| Lớp | Ví dụ | Tắt runtime được? |
+|---|---|---|
+| Runtime CFGM | DMI/ACPI/MPS values, serial, EDID, HDA codec | ✅ |
+| Build-time asset | `vbox.dsl`, PC BIOS ROM, VGA BIOS ROM, OVMF branding | ❌ |
+| Driver/INF | tên GA, PCI match ID, service name | ❌ (phải rebuild + ký) |
+
+**Quyết định:** có hai build mode:
+- `stock`: không patch asset build-time; dùng khi cần baseline.
+- `cloak`: patch asset build-time; `CloakEnabled` chỉ điều khiển lớp runtime.
+
+Mỗi mode sinh `BuildIdentityManifest` riêng; `CloakEnabled=true` chỉ hợp lệ với manifest `cloak`. Không hứa “off = stock”. Nếu cần per-VM asset, chỉ BIOS có cơ chế `BiosRom` (`DevPcBios.cpp:1650`); VGA BIOS/OVMF/DSDT chưa có cơ chế chọn per-VM đáng tin và **không** nằm trong baseline.
+
+#### 4.5.10 Hypervisor presentation
+
+Chọn đúng một mode trong `CloakHvPresentation` (xem bảng §3.1):
+
+- `Hidden`: HVP=0; không vendor/leaves Hyper-V; GIM `Minimal`/không GIM; phải kiểm tra CPUID.1, `0x40000000..0x40000006`, MSRs và timing.
+- `HyperV`: HVP=1; vendor `Microsoft Hv`; leaves đầy đủ; GIM `HyperV`; chỉ dùng khi profile khai báo VBS/Hyper-V.
+- `HVP=0` + vendor Hyper-V = **fail**. `Hidden` + GIM HyperV = **fail**.
+- Task 1.1 và 1.2 là một PR/one design, không merge riêng lẻ.
+
+#### 4.5.11 BuildIdentityManifest
+
+Một profile runtime không thể tự chứng minh nó khớp với asset build-time. Thêm manifest sinh lúc build và nhúng vào binary/artifact:
+
+```c
+typedef struct BUILDIDENTITYMANIFEST
+{
+    const char *pszBuildMode;          /* "stock" | "cloak" */
+    const char *pszFirmwareFamily;     /* LENOVO/AMI, Dell/AMI, ... */
+    const char *pszPcBiosVersion;
+    const char *pszOvmfVersion;
+    const char *pszDsdtHash;           /* SHA-256 */
+    const char *pszVgaBiosHash;        /* SHA-256 */
+    const char *pszBiosRomHash;        /* SHA-256 */
+    uint32_t    fSupportedChipsets;    /* i440fx | piix3 | ich9 */
+    uint16_t    uVmmDevVendorId;
+    uint16_t    uVmmDevDeviceId;
+    uint16_t    uVgaVendorId;
+    uint16_t    uVgaDeviceId;
+    uint16_t    uVirtioVendorId;
+    const char *pszSourceRevision;     /* git sha */
+    const char *pszBuildHash;          /* SHA-256 của các field trên, không gồm chính nó */
+} BUILDIDENTITYMANIFEST;
+```
+
+Nguồn manifest:
+- Sinh bởi build system (`Config.kmk`/kBuild) hoặc script build; ghi `build-identity.json` vào artifact.
+- Nhúng bản read-only vào `VBoxC`/`VBoxRT` để runtime đọc; không đọc file bên ngoài.
+- `pszBuildHash` bao gồm source revision + hash asset + build mode.
+
+MPE kiểm tra trước khi materialize:
+1. `pszBuildMode` phải là `cloak` khi `CloakEnabled=true`; build `stock` không được nhận profile cloak.
+2. `pszRequiredFirmwareFamily` phải khớp `pszFirmwareFamily`.
+3. `fSupportedChipsets` của profile phải là tập con của manifest.
+4. Binding ID trong profile phải khớp manifest (VMMDev/VGA/virtio).
+5. Manifest mismatch với profile `COMPATIBLE` → fail; với `RESEARCH_ONLY` → fail trừ khi test-only override có log rõ và không selectable production.
+6. `VBoxInternal/Cloak/Profile` **không** được bỏ qua các kiểm tra trên.
+
+Test bắt buộc: manifest khớp; manifest sai family; manifest sai chipset; manifest `stock` + cloak; manifest hash sai. T1 đọc `build-identity.json` và so với binary/expected; T3 đọc runtime manifest qua debug info.
 
 ---
 
@@ -558,32 +745,80 @@ Các task **không** nằm trong MPE (vì phụ thuộc runtime device, không p
 
 | Ứng viên | Ổn định? | Nhận xét |
 |---|---|---|
-| **VM UUID** (`pMachine->getId()` / config `UUID`) | ✅ | Lưu trong `.vbox`, không đổi trừ khi user đổi. **Chọn làm seed gốc** |
-| MAC address adapter | ✅ | Ổn định nếu user không đổi; nhưng user hay đổi → dùng làm *stream* phụ |
+| **`CloakSeed`** (32 byte, ExtraData host-side) | ✅ | **Seed gốc**. Provision một lần bằng CSPRNG; không regenerate mỗi boot |
+| **VM UUID** (`pMachine->getId()` / config `UUID`) | ✅ | **Salt**, không phải secret; guest có thể đọc SMBIOS UUID. Dùng trong KDF để clone/migration đổi identity |
 | Đường dẫn file `.vbox` | ❌ | Đổi khi move VM |
 | Timestamp | ❌ | Đổi mỗi lần |
 | `RTRandCreateSystem()` | ❌ | Không seedable → không tái lập được |
 
-→ **Seed gốc = VM UUID.**
+→ **Seed gốc = `CloakSeed`; VM UUID là salt.** Không dùng VM UUID làm seed duy nhất: UUID thường liên hệ SMBIOS UUID guest-visible, nên nếu algorithm biết được thì toàn bộ identity có thể tái tạo.
+
+**Lưu trữ `CloakSeed`:**
+- Key: `VBoxInternal/Cloak/Seed` (ExtraData host-side; overlay thành `/Cloak/Seed` ở CFGM root, **không** vào SMBIOS hay node device).
+- Metadata: `VBoxInternal/Cloak/SeedHash`, `.../ProfileId`, `.../ManifestHash`; dùng cho state guard §4.6.5.
+- **Chỉ sinh ở bước provision**, không sinh trong `i_configConstructorX86()`/MPE startup.
+- Không hiển thị qua `VBoxManage showvminfo`; đọc/ghi qua ExtraData. Không log giá trị seed.
+- Backup/restore seed cùng `.vbox`; seed mất → VM fail cho tới khi provision lại; provision lại sẽ đổi các field seed-derived.
+
+**Cảnh báo bảo mật:** ExtraData **không phải** secret store. Người dùng/tiến trình có quyền quản lý VM hoặc đọc `.vbox` có thể đọc seed. Threat model chỉ chống guest và detector bên ngoài, **không** chống host admin. Nếu cần chống host, phải dùng DPAPI/credential store riêng — ngoài baseline.
+
+#### 4.6.2.1 Provision seed vs consume seed
+
+Tách tuyệt đối hai pha:
+
+| Pha | Thời điểm | Hành vi |
+|---|---|---|
+| **Provision** | VM powered off, trước `startvm` | Sinh `CloakSeed` 32 byte bằng CSPRNG; persist qua `IMachine::setExtraData` hoặc CLI provision; verify đọc lại thành công |
+| **Consume** | `i_configConstructorX86()` | Chỉ đọc `/Cloak/Seed`; không ghi ExtraData; dùng seed + UUID salt để materialize |
+
+Lý do: `MachineImpl.cpp:4529-4532` từ chối `setExtraData` nếu không phải session machine; `:4559-4571` thực hiện save settings dưới lock. Ghi cấu hình trong constructor dễ fail, bị veto bởi `i_onExtraDataCanChange`, hoặc tạo trạng thái dở dang.
+
+Đường provision:
+- CLI host-side `VBoxManage cloak provision <vm>` (VM off) gọi helper Main API; không log seed.
+- UI action “Provision cloak seed” có thể thêm ở PR-5, dùng cùng helper.
+- Không expose seed qua `showvminfo` hay Guest Control.
+
+Quy tắc:
+- `CloakEnabled=true` + seed thiếu/rỗng/sai kích thước → **fail** với diagnostic rõ (“run cloak provision first”); **không** fallback sang VM UUID.
+- `CloakEnabled=false` → không cần seed.
+- Provision phải idempotent: nếu seed đã tồn tại, không ghi đè trừ khi `--force`/re-seed rõ ràng.
+- Test dùng seed cố định qua test harness, không dùng seed production.
+- Provision/consume phải có test cho: thiếu seed, seed sai độ dài, seed bị sửa, seed bị xóa, VM đang chạy.
 
 #### 4.6.3 Thuật toán
 
 ```
-seed64 = FNV1a64( "VBoxCloakProfile" || VM_UUID_16_bytes )
+CloakSeed = 32 bytes CSPRNG, lưu ExtraData VBoxInternal/Cloak/Seed
 
-// tách thành nhiều stream độc lập, mỗi stream 1 mục đích
+// trộn secret + UUID: UUID là salt, không phải secret
+seed64 = first8( HMAC-SHA-256( CloakSeed, "VBoxCloakProfile" || VM_UUID_16_bytes ) )
+
+// tách stream độc lập, mỗi stream 1 mục đích
 stream_profile = splitmix64(seed64 + 0x01)
 stream_serial  = splitmix64(seed64 + 0x02)
-stream_macdid  = splitmix64(seed64 + 0x03)
-stream_jitter  = splitmix64(seed64 + 0x04)
+stream_jitter  = splitmix64(seed64 + 0x03)
 ```
 
-`splitmix64` là PRNG 64-bit tốt, tự implement được (~10 dòng), không cần thêm thư viện.
+- Dùng HMAC-SHA-256 (hoặc KDF tương đương có trong VBoxRT). `splitmix64` chỉ để mở rộng stream, không phải nguồn bí mật.
+- **Không** dùng `FNV1a64(VM_UUID)` làm seed duy nhất.
+- **Không** đưa `CloakSeed` vào bất kỳ DMI/ACPI/CFGM device value nào.
 
-**Quy tắc bắt buộc:** chỉ materialize **một lần** trong MPE, rồi ghi kết quả vào CFGM. **Không** tính lại ở nhiều nơi — nếu device nào đó tự gọi PRNG với cùng seed thì vẫn ra cùng giá trị, nhưng nếu thứ tự gọi khác nhau (ví dụ thêm/bớt 1 lần gọi) thì các giá trị phía sau **đổi hết** → mất tính ổn định. Vì vậy:
+**Quy tắc bắt buộc:** chỉ materialize **một lần** trong MPE, rồi ghi kết quả vào CFGM. **Không** tính lại ở nhiều nơi — nếu thứ tự gọi khác nhau (thêm/bớt 1 lần gọi) thì các giá trị phía sau **đổi hết** → mất tính ổn định. Vì vậy:
 - PRNG **chỉ** nằm trong MPE (VBoxC).
 - Device chỉ đọc giá trị đã materialize từ CFGM.
-- Ngoại lệ duy nhất: virtio-net DID — phụ thuộc MAC mà MAC chỉ biết ở device. → Dùng `stream_macdid` với seed = `FNV1a64(seed64 || MAC)`, vẫn deterministic vì MAC ổn định.
+- Không còn ngoại lệ virtio-net DID, vì 2.16/2.17 đã bị loại khỏi baseline.
+
+**Vòng đời seed:**
+
+| Tình huống | Hành vi |
+|---|---|
+| Bật cloak lần đầu | **Provision** (VM off): sinh `CloakSeed`, persist, verify |
+| Mở lại VM | **Consume** seed cũ; không regenerate, không ghi ExtraData |
+| Clone bằng `VBoxManage clonevm` | Nếu UUID mới → seed64 khác → các field seed-derived khác; hardware/firmware cố định giữ nguyên |
+| Clone giữ nguyên UUID | Identity giữ nguyên; phải ghi rõ trong test |
+| Export/import giữ UUID | Identity giữ nguyên |
+| Export/import đổi UUID | Các field seed-derived đổi; đây là “máy mới” |
+| Re-seed | Chỉ các field sinh từ seed đổi; CPU/chipset/firmware/build-time asset **không** đổi |
 
 #### 4.6.4 Xác minh tính ổn định
 
@@ -591,46 +826,77 @@ Test bắt buộc:
 
 | Test | Cách |
 |---|---|
-| Cùng VM, mở lại 3 lần | Giá trị identity giống hệt nhau (so `debugvm info pci verbose` + DMI dump) |
-| Clone VM (copy `.vbox` + disk) | **Có thể khác** — vì UUID khác. Đây là hành vi mong muốn (mỗi "máy" là 1 máy khác) |
+| Cùng VM, mở lại 3 lần | Giá trị identity giống hệt nhau (so `debugvm info pci verbose` + DMI/ACPI collector) |
+| Clone bằng `VBoxManage clonevm` (new UUID) | Identity **khác**; không dùng test copy `.vbox` + disk thủ công |
 | 2 VM trong 1 lần build | Bộ giá trị khác nhau, không trùng lặp |
-| Re-seed bằng UUID mới | Đổi toàn bộ bộ giá trị |
+| Re-seed (`CloakSeed` mới) | Chỉ các field seed-derived đổi; CPU/chipset/firmware/build asset không đổi |
+| Xóa seed | Fail rõ ràng; yêu cầu provision lại; không tự sinh, không dùng UUID |
+| Migration giữ UUID | Identity giữ nguyên |
+| Migration đổi UUID | Các field seed-derived đổi có kiểm soát |
 
-#### 4.6.5 Cách ép 1 profile cụ thể (cho test)
+#### 4.6.5 Saved state, snapshot và migration
+
+Identity phải ổn định không chỉ qua cold boot mà còn qua saved state/snapshot; nếu không, VM có thể mang DMI từ profile A nhưng PCI/device từ profile B.
+
+Contract:
+- Khi materialize lần đầu, ghi `VBoxInternal/Cloak/SeedHash`, `VBoxInternal/Cloak/ProfileId`, `VBoxInternal/Cloak/ManifestHash` vào ExtraData + metadata runtime state.
+- Khi restore saved state/snapshot: so hash với cấu hình hiện tại **trước** device construct.
+- Khớp → tiếp tục, không materialize lại.
+- Không khớp → fail với diagnostic rõ; chỉ cho phép:
+  - discard saved state/snapshot và cold boot lại, hoặc
+  - provision/re-seed có chủ đích, hoặc
+  - chọn đúng profile/manifest cũ.
+- Không tự sinh seed mới, không tự chọn profile khác, không “best effort” trộn identity.
+- Export/import: seed + hash phải đi cùng `.vbox`; nếu thiếu → fail. UUID giữ nguyên → identity giữ; UUID đổi → chỉ field seed-derived đổi.
+
+Test bắt buộc:
+
+| Test | Kỳ vọng |
+|---|---|
+| Save state → restore, không đổi gì | Identity giống hệt |
+| Save state → đổi seed/profile → restore | Fail rõ; không trộn |
+| Snapshot → restore, không đổi gì | Identity giống hệt |
+| Snapshot → đổi seed/profile → restore | Fail rõ hoặc yêu cầu discard |
+| Export/import giữ UUID | Identity giữ nguyên |
+| Export/import đổi UUID | Field seed-derived đổi có kiểm soát |
+
+Task implementation: `1.0.12` (state guard + hash) và test T3 `0.4.3c`.
+
+#### 4.6.6 Cách ép 1 profile cụ thể (cho test)
 
 Cần cơ chế override, nếu không sẽ không test được từng profile:
 
 ```
-ExtraData: VBoxInternal/cloak/0/Config/Profile = profile-lenovo-t14
+ExtraData: VBoxInternal/Cloak/Profile = test-profile-synthetic
 ```
 
-Khi key này có mặt → MPE **bỏ qua** PRNG, dùng profile cố định. Giá trị random (serial, jitter) vẫn lấy từ PRNG → vẫn ổn định.
+Khi key này có mặt → MPE **bỏ qua** PRNG profile, dùng profile cố định. Giá trị random (serial, jitter) vẫn lấy từ PRNG → vẫn ổn định. Profile `DRAFT`/`RESEARCH_ONLY` bị từ chối ở production; manifest family/chipset/binding vẫn phải khớp. Trong giai đoạn O4 chỉ `test-profile-synthetic` dùng được cho test.
 
 ---
 
 ### 4.7 CI bằng GitHub Actions (quyết định #4)
 
-> **Phát hiện quan trọng:** repo **đã có sẵn** một workflow build hoạt động:
-> `.github/workflows/build.yml` (310 dòng, hiện **chưa commit** — `git status` → `?? .github/workflows/`).
-> Bước 4.7.1-4.7.3 mô tả chính workflow đó; 4.7.4-4.7.6 nêu các **fix cần làm** trước khi dùng được.
+> **Trạng thái hiện tại (2026-10-22):** `.github/workflows/build.yml` đã được commit, hiện **1000 dòng**, checkout đúng repo `${{ github.repository }}`, trigger đã có `feature/cloak*` và `pull_request`.
+> Các mục 4.7.1-4.7.3 mô tả workflow hiện tại; 4.7.4 mô tả 3 tầng kiểm chứng; 4.7.9 là **lịch sử lỗi đã xử lý**, không phải trạng thái hiện tại.
 
 #### 4.7.1 Workflow hiện có — `.github/workflows/build.yml`
 
 | Thuộc tính | Giá trị |
 |---|---|
 | Tên | `Build VirtualBox 7.2 (Windows x64)` |
-| Trigger | `workflow_dispatch`, `push` → `main`, `VBox-7.2` |
+| Trigger | `workflow_dispatch`; `push`/`pull_request` → `main`, `VBox-7.2`, `feature/cloak*` |
 | Runner | `windows-2022`, timeout 360 phút |
 | Quyền | `contents: read` |
 | Env | `VBOX_WITHOUT_ADDITIONS=1`, `VBOX_WITH_ADDITIONS_PACKING=""` |
 | Output | `out\win.amd64\release\bin` |
-| Artifact | `virtualbox-7.2-windows-amd64-binaries` + `virtualbox-windows-build-diagnostics` |
+| Jobs | `build`, `full-additions`, `smoke` |
+| Artifact | `virtualbox-7.2-windows-amd64-binaries`, `virtualbox-windows-build-diagnostics`, `cloak-identity-report`, `virtualbox-guest-additions` |
 
 Các bước (theo thứ tự trong file):
 
 | # | Step | Nội dung |
 |---|---|---|
-| 1 | Checkout | `repository: VirtualBox/virtualbox`, `ref: VBox-7.2`, `submodules: recursive` |
+| 1 | Checkout | `repository: ${{ github.repository }}`, `fetch-depth: 1`, `submodules: recursive` |
 | 2 | MSVC | `ilammy/msvc-dev-cmd@v1`, `arch: amd64` |
 | 3 | Verify | Kiểm tra `kBuild\kBuild\bin\win.amd64\kmk.exe` (+ `kmk_ash.exe`, `win.x86\kmk.exe`) và `Windows Kits\10\Include` → **kBuild đã có sẵn binary trong repo, không cần build** |
 | 4 | Patch DDK | Sửa `configure.vbs` để bỏ lệnh gọi `CheckForWinDDK` |
@@ -686,99 +952,68 @@ VBOX_WITH_VALIDATIONKIT =
 
 **Kết luận:** workflow hiện tại **đã build được VirtualBox đầy đủ (trừ Guest Additions)**. Việc cần làm không phải "dựng CI từ đầu" mà là **vá nó cho đúng mục đích cloak**.
 
-#### 4.7.3 Lỗi nghiêm trọng cần sửa trước tiên
+#### 4.7.3 Checkout và trigger — ĐÃ SỬA
 
-```yaml
-- name: Checkout VirtualBox
-  uses: actions/checkout@v4
-  with:
-    repository: VirtualBox/virtualbox     # ← ĐANG BUILD UPSTREAM, KHÔNG PHẢI REPO CỦA BẠN
-    ref: VBox-7.2
-    fetch-depth: 1
-    submodules: recursive
-```
+Không còn lỗi build upstream. Trạng thái hiện tại:
 
-→ Workflow hiện tại **build `VirtualBox/virtualbox`**, không build code của `vuong4-design/virtualbox`.
-Mọi thay đổi cloak sẽ **không được compile** cho tới khi sửa.
+- `.github/workflows/build.yml:42` dùng `repository: ${{ github.repository }}`.
+- Trigger có `main`, `VBox-7.2`, `feature/cloak*` cho cả `push` và `pull_request`.
+- `source-revision.txt` ghi repo/ref/sha vào artifact.
 
-**Fix:**
+**Không tái đưa** `repository: VirtualBox/virtualbox` trở lại. Nếu cần kiểm tra, xem `source-revision.txt` trong artifact; nếu `source_repo` không phải repo hiện tại → fail CI.
 
-```yaml
-      - name: Checkout VirtualBox
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}   # repo của bạn
-          ref: ${{ github.ref_name }}             # branch đang push
-          fetch-depth: 1
-          submodules: recursive
-```
+#### 4.7.4 Ba tầng kiểm chứng (thay cho smoke chạy VM trên hosted runner)
 
-Hoặc bỏ hẳn khối `with:` (checkout mặc định đã đúng repo/branch của event).
+GitHub-hosted `windows-2022` **không có `VBoxDrv`** và **không có nested virtualization**. Vì vậy không được coi `smoke` xanh là bằng chứng runtime.
 
-**Cũng cần sửa trigger** — hiện chỉ chạy cho `main` và `VBox-7.2`:
+| Tầng | Runner | Nội dung | Gate |
+|---|---|---|---|
+| **T1 — Build/static/binary** | `windows-2022` | Build; `scan-identity.ps1` quét string trong `VBoxDD.dll`, `VBoxVMM.dll`, `VBoxC.dll`, `VirtualBox.exe`; so baseline; kiểm `build-identity.json` | Mọi PR |
+| **T2 — Config plane** | `windows-2022` | `VBoxManage createvm` + `setextradata` + `showvminfo --machinereadable`; không cần `VBoxDrv` | Mọi PR |
+| **T3 — Runtime identity** | self-hosted Windows bare-metal có `VBoxDrv` + VT-x | Boot VM **3 lần** trên cùng VM; host `debugvm` + guest collector Windows/Linux; schema comparator; negative tests | PR-2/PR-3/PR-6 và release |
 
-```yaml
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-      - VBox-7.2
-      - 'feature/cloak-*'
-  pull_request:
-    branches:
-      - VBox-7.2
-      - 'feature/cloak-*'
-```
+Quy tắc:
+- `smoke` trên hosted runner chỉ là T1+T2. Không gọi là “identity verification”.
+- T3 phải là job riêng `t3-runtime` trên self-hosted runner; **không** chạy trong `smoke`, không fallback sang hosted. Thiếu `VBoxDrv`/VT-x → **fail**, không skip.
+- T3 boot **3 lần** liên tiếp trên cùng VM: boot 1 lấy baseline, boot 2 và 3 phải giống hệt boot 1; nếu bất kỳ boot nào khác → fail.
+- T3 phải có ít nhất **1 guest Windows + 1 guest Linux**, vì binding VMMDev/VGA/virtio có thể khác nhau theo GA/driver.
+- `showvminfo` không đọc CFGM nội bộ; T3 dùng `debugvm <vm> info pci verbose` + collector trong guest. Nếu cần kiểm tra materialize, thêm debug-info `cfgm` test-only.
+- T3 chỉ có ý nghĩa khi guest thực sự boot tới userspace và collector chạy xong; “no bootable device” không phải T3.
+- **Hiện trạng:** chưa có job `t3-runtime`, chưa có guest collector, script host chỉ chạy 2 lần; các task `0.4.3a–c` phải xong trước khi gate T3 có hiệu lực.
 
-#### 4.7.4 Bổ sung: job `smoke` (kiểm chứng identity)
+Yêu cầu VM cho T3:
+- Guest Windows (PE/WinPE hoặc image test) và Linux live có disk ảo; T3 dùng VM có disk, **không** dùng chế độ no-disk của script host; `debugvm` chạy trên chính VM đó.
+- Guest collector: Windows đọc WMI/registry/DMI/ACPI/PCI/EDID; Linux đọc `dmidecode`, `acpidump`, `lspci -nnvv`, `lsusb`, EDID, storage/NIC.
+- Không dùng test “copy `.vbox` + disk” để kiểm tra clone; dùng `VBoxManage clonevm`.
+- Guest không có shared folder/host credential; runner là máy chuyên dụng, không dùng production secrets.
 
-Cần một bước/job chạy sau build để **tự động** xác nhận cloak có hoạt động:
+#### 4.7.4.1 Fingerprint comparator (thay mask hex)
 
-```yaml
-  smoke:
-    needs: build
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: virtualbox-7.2-windows-amd64-binaries
-          path: vbox
-      - name: Register COM server
-        shell: cmd
-        run: vbox\VBoxSVC.exe /RegServer
-      - name: Collect identity
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          & .\vbox\VBoxManage.exe list vms | Tee-Object vms.txt
-          & .\vbox\VBoxManage.exe showvminfo "<vm>" --machinereadable | Out-File vminfo.txt
-          & .\vbox\VBoxManage.exe debugvm "<vm>" info pci verbose | Out-File pci.txt
-          # so sánh với artifact của run trước (baseline)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cloak-identity-report
-          path: |
-            vms.txt
-            vminfo.txt
-            pci.txt
-```
+Script hiện tại mask `uuid:` và các chuỗi hex 8–16 ký tự; cách này có thể che cả PCI ID/CPUID/giá trị identity thật. T3 phải dùng comparator theo schema:
 
-Yêu cầu: cần **một VM đã định nghĩa** trong CI. Có 2 lựa chọn:
+| Bước | Yêu cầu |
+|---|---|
+| Parse | Tách output collector thành field có kiểu: SMBIOS string, ACPI table/OEM ID, PCI BDF/VID/DID/SVID/SDID, CPUID leaf/reg, EDID block, storage INQUIRY, NIC EEPROM, TPM |
+| Canonicalize | Chuẩn hóa thứ tự field, endianness, lowercase hex; **không** mask giá trị identity |
+| Allowlist volatile | Chỉ bỏ field thật sự volatile (timestamp, uptime, session id, địa chỉ RAM) — danh sách nằm trong code, có review |
+| Compare | So semantic equality; output diff theo field, không chỉ hash |
+| Negative | Test cố ý đổi VID/DID, CPUID leaf, DMI serial, ACPI OEM ID → comparator **phải fail** |
 
-| Lựa chọn | Cách | Đánh giá |
-|---|---|---|
-| A. VM do CI tạo | `VBoxManage createvm` + `VBoxManage storagectl` (disk rỗng) | Nhanh, không cần image. **Chỉ đọc được identity host-side** (`showvminfo`, `debugvm info pci` chạy được khi VM tắt) — đủ để verify phần lớn |
-| B. VM có sẵn từ artifact | Upload `.vbox` + disk tối thiểu vào artifact, tải xuống ở job smoke | Chạy được guest thật → verify được cả ACPI/DMI trong guest. Cần disk image nhỏ (Linux live ~50 MB) |
+Không dùng hash của raw text làm bằng chứng duy nhất; raw dump chứa serial/UUID và không được upload nguyên bản.
 
-→ **Khuyến nghị:** dùng **A** cho PR gating (nhanh, không cần image), **B** cho release/manual verification.
+#### 4.7.4.2 T3 isolation & artifact protection
+
+- Runner T3 là máy self-hosted chuyên dụng, network tối thiểu; không dùng runner dùng chung với workload khác.
+- Artifact T3 có thể chứa serial/UUID/seed-adjacent data: chỉ upload **report đã redact**; raw dump giữ local có thời hạn, không đưa vào artifact công khai.
+- Không đưa `CloakSeed`, `.vbox`, disk image hoặc dump DMI thô vào artifact.
+- Artifact report phải ghi schema version, build hash, profile ID/class, boot count; retention ngắn và có access control.
+- T3 fail vì artifact không đủ/không redact cũng là fail gate.
 
 #### 4.7.5 Bổ sung: job `full-additions` (Guest Additions + WDK)
 
 > **ĐÃ TRIỂN KHAI** — `.github/workflows/build.yml` (job `full-additions`) + `.github/scripts/install-wdk.ps1`
 
-Job `build` đặt `VBOX_WITHOUT_ADDITIONS=1` → **không** build driver GA → PR-2 (đổi tên GA) không verify được. Job mới build lại toàn bộ với GA bật.
+Job `build` đặt `VBOX_WITHOUT_ADDITIONS=1` → **không** build driver GA → PR-4 (đổi tên GA) không verify được. Job mới build lại toàn bộ với GA bật.
 
 #### 4.7.5.1 Phát hiện quan trọng: DDK 7.1 vs WDK 10
 
@@ -864,30 +1099,38 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | Không có DDK 7.1 | Dùng lib Win7 thay cho Vista/XP. Driver x86 (`VBoxGuest` x86, `VBoxMouseNT`, `VBoxVideo` xpdm) có thể không link được vì thiếu `exsup.lib` (lib thời XP) |
 | `VBOX_WINDDK_GST_NT4` → `WINSDK10-KM-W7` | `VBoxGuest.sys` x86 + `VBoxVideo.sys` (xpdm) + `VBoxMouseNT.sys` có thể fail link → có thể phải bỏ `VBOX_WITH_ADDITIONS_ISO.win.x86` |
 | WDK 19041 không còn trên VS 2022 mới nhất | Đã xử lý bằng layout fallback; nếu Microsoft gỡ hẳn feature id thì job sẽ fail với thông báo rõ |
-| Job build lại toàn bộ (~2-4h) | Chấp nhận được ở giai đoạn hiện tại; có thể tối ưu bằng `paths` filter khi PR-2 hoàn tất |
+| Job build lại toàn bộ (~2-4h) | Chấp nhận được ở giai đoạn hiện tại; có thể tối ưu bằng `paths` filter khi PR-4 hoàn tất |
 
 #### 4.7.6 Mapping PR → job
 
 | PR | Job | Ghi chú |
 |---|---|---|
-| PR-1 `cloak-identity` | `build` (hiện có, sau khi sửa checkout) + `smoke` | Không đụng GUI/GA |
-| PR-2 `cloak-ga-rename` | `full-additions` | Cần WDK |
-| PR-3 `cloak-provisioning` | `build` | Đụng GUI (Qt) |
-| PR-4 `cloak-coherence` | `build` + `smoke` | Có thể đụng libtpms |
+| PR-1 `cloak-foundation` | `build` + T1/T2 | MPE/control plane, seed provision/consume, manifest skeleton, state guard; identity guest-visible **không đổi**; T3 differential bằng 0 khi T3 sẵn sàng (bắt buộc trước PR-2) |
+| PR-2 `cloak-cpu-firmware` | `build` + T1/T2 + T3 | CPUID/HVP + DMI/ACPI/BIOS/VGA/EFI; cần T3 self-hosted 3 boot |
+| PR-3 `cloak-devices` | `build` + T1/T2 + T3 | PCI/storage/USB/network; cần binding test Windows + Linux |
+| PR-4 `cloak-ga-rename` | `full-additions` + lifecycle | Cần WDK; kiểm tra chữ ký, cài mới, upgrade, uninstall, rollback |
+| PR-5 `cloak-provisioning` | `build` + guest integration | Đụng GUI (Qt); test quyền, rollback và guest state |
+| PR-6 `cloak-coherence-tpm` | `build` + T3 | Residual coherence + TPM (2.19) + libtpms; không phải coherence lần đầu |
 
 #### 4.7.7 Danh sách task CI cụ thể (Phase 0)
 
 | # | Task | File | Trạng thái | Nghiệm thu |
 |---|---|---|---|---|
-| 0.3.1 | Commit workflow hiện có vào git | `.github/workflows/build.yml` | ✅ **đã làm** (file tồn tại, chưa commit) | `git ls-files .github/workflows` có file |
-| 0.3.2 | **Sửa checkout** sang repo của bạn + mở trigger `feature/cloak*` + `pull_request` | `.github/workflows/build.yml:3-14`, `:36-44` | ✅ **đã làm** | Push lên branch → workflow build đúng commit của bạn (kiểm tra `source-revision.txt` trong artifact) |
-| 0.3.3 | Thêm `setup-python` nếu thiếu | — | ⛔ **bỏ qua** | Python chỉ dùng cho macOS bindings (`Makefile.kmk` của `src/VBox/Main`); Windows build không cần |
-| 0.3.4 | Cache `out/` để tăng tốc | — | ⛔ **bỏ qua (có lý do)** | kBuild so sánh **timestamp**; restore cache làm timestamp mất thứ tự → có thể build sai. An toàn hơn là rebuild sạch |
-| 0.3.5 | Ghi `source-revision.txt` (repo/ref/sha) vào artifact | `.github/workflows/build.yml` | ✅ **đã làm** | Artifact diagnostics chứa `source-revision.txt` |
+| 0.3.1 | Commit workflow hiện có vào git | `.github/workflows/build.yml` | ✅ **đã commit** | `git ls-files .github/workflows` có file |
+| 0.3.2 | Sửa checkout sang repo hiện tại + mở trigger `feature/cloak*` + `pull_request` | `.github/workflows/build.yml:3-14`, `:42` | ✅ **đã làm** | `source-revision.txt` có `source_repo` đúng |
+| 0.3.3 | Thêm `setup-python` nếu thiếu | — | ⛔ **bỏ qua** | Python chỉ dùng cho macOS bindings; Windows build không cần |
+| 0.3.4 | Cache `out/` để tăng tốc | — | ⛔ **bỏ qua (có lý do)** | kBuild so sánh timestamp; restore cache có thể build sai |
+| 0.3.5 | Ghi `source-revision.txt` (repo/ref/sha) vào artifact | `.github/workflows/build.yml` | ✅ **đã làm** | Artifact diagnostics có file |
 | 0.3.6 | `concurrency` để huỷ run cũ | `.github/workflows/build.yml:19-22` | ✅ **đã làm** | Push liên tiếp chỉ giữ run mới |
-| 0.4.1 | Thêm job `smoke` (3 kịch bản: ICH9+BIOS, PIIX3+BIOS, ICH9+EFI) | `.github/workflows/build.yml` + `.github/scripts/collect-identity.ps1` | ✅ **đã làm** | Artifact `cloak-identity-report` + `stability.txt` |
-| 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
-| 0.4.3 | Job `smoke` với VM thật (có disk) | — | ⬜ chưa làm | Verify được DMI/ACPI **trong guest** |
+| 0.4.1 | T1/T2: scan binary + config plane | `.github/workflows/build.yml` + `.github/scripts/scan-identity.ps1`, `collect-identity.ps1` | ✅ **đã làm** | Artifact `cloak-identity-report` + `binary-identity.txt` |
+| 0.4.1a | Verify `build-identity.json` + manifest nhúng | build + `.github/scripts/verify-manifest.ps1` | ⬜ **chưa làm** | Family/chipset/binding/hash khớp; mismatch fail |
+| 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** | Xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
+| 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | ⬜ **chưa làm** | `t3-runtime` job; `VBoxDrv` + VT-x; fail nếu thiếu |
+| 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | ⬜ **chưa làm** | Boot tới userspace; DMI/ACPI/PCI/EDID/storage/NIC |
+| 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | ⬜ **chưa làm** | Không mask identity; negative test fail đúng |
+| 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | ⬜ **chưa làm** | 3 boot giống hệt; state restore không trộn identity |
+| 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
+| 0.4.5 | T3 artifact isolation/redaction | T3 job + script | ⬜ **chưa làm** | Report redact; không seed/.vbox/raw DMI trong artifact |
 
 **Về script `collect-identity.ps1`** (`.github/scripts/collect-identity.ps1`):
 
@@ -895,11 +1138,14 @@ Lib\win7\km\x64                Lib\win8\km\x64
 |---|---|
 | Cơ chế | `VBoxManage debugvm <vm> info <item>` — 10 info item đã đăng ký qua `PDMDevHlpDBGFInfoRegister()`: `pci` (verbose), `acpi`, `vga`, `vbe`, `hda`, `ohci`, `xhci`, `vmsvga`, `lpc`, `hpet` |
 | VM | Tạo headless **không có đĩa boot** → BIOS dừng ở "no bootable device" nhưng VMM vẫn sống → debugger info hoạt động |
-| Hardware UUID | Cố định theo kịch bản → selector deterministic |
-| Kiểm tra ổn định | Chạy **2 lần** trên cùng 1 VM, so fingerprint → fail nếu khác. Đây là test trực tiếp cho yêu cầu "random nhưng ổn định" |
-| Chuẩn hoá fingerprint | Bỏ dòng trống, bỏ dòng chứa timestamp/session/uuid, mask địa chỉ hex dài (`0x[0-9a-f]{8,16}` → `0xADDR`) |
+| Phạm vi | Đây là **host-side collector**, không phải guest collector. Nó không đọc DMI/ACPI từ trong guest và không chứng minh guest-visible identity |
+| Hardware UUID + `CloakSeed` | Cố định theo kịch bản → selector deterministic; không sinh seed mới trong test |
+| Kiểm tra ổn định | T3 job gọi **3 lần** trên cùng VM (script cần hỗ trợ `--runs 3`; hiện tại chỉ 2), so schema fingerprint → fail nếu khác |
+| Chuẩn hoá fingerprint | **Không dùng** mask hex hiện tại (`0x[0-9a-f]{8,16}` → `0xADDR`) vì có thể che PCI ID/CPUID/identity thật; thay bằng comparator §4.7.4.1 |
 | Kịch bản | `ich9-bios` (mặc định), `piix3-bios` (`--chipset piix3`), `ich9-efi` (`--firmware efi`) — phủ cả 2 chipset và cả 2 đường DMI (pcbios/efi) |
-| Exit code | 0 = ổn định, 1 = không ổn định, 2 = lỗi môi trường |
+| Runtime target | Headless không disk chỉ đủ cho debug info; T3 cần VM có disk Linux live/Windows PE để chạy collector trong guest |
+| T3 variant | `collect-identity.ps1 -VmName <vm> --runs 3` gắn vào VM có disk do T3 job tạo; không tự tạo VM no-disk |
+| Exit code | 0 = ổn định, 1 = không ổn định, 2 = lỗi môi trường; `-RequireRuntime` biến thiếu runtime thành fail. T3 **không được** chấp nhận exit 0 khi runtime thiếu |
 
 > Script được upload thành artifact `cloak-ci-scripts` từ job `build` → job `smoke` **không cần checkout repo** (tránh clone lại ~1.4 GB).
 
@@ -911,18 +1157,25 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | CI-1 | `CheckSourcePath` — path phải ASCII, không space | OK với runner mặc định |
 | CI-2 | kBuild | Đã prebuilt trong repo — **không cần build** (đã xác minh qua step "Verify kBuild") |
 | CI-3 | 32-bit OpenSSL/curl | Đã chạy được (workflow hiện tại build thành công) |
-| CI-4 | WDK cho GA driver | `choco install wdk` — version pin, có thể cần self-hosted runner |
+| CI-4 | WDK cho GA driver | `install-wdk.ps1` tải MSI/CAB 19041 trực tiếp; không dùng `choco install wdk`; vẫn có thể cần self-hosted nếu CDN đổi |
 | CI-5 | Qt 6.8.0 download ~1 GB | `install-qt-action` đã có `cache: true` |
 | CI-6 | RAM/CPU | `windows-2022` = 4 vCPU / 16 GB; timeout 360 phút đã đặt rộng |
 | CI-7 | `env.bat` chứa đường dẫn tuyệt đối | Chạy `configure.vbs` **trong** job, không cache `env.bat` |
 | CI-8 | `kmk` song song | `-j$([Environment]::ProcessorCount)` — đã có |
 | CI-9 | Artifacts lớn | `upload-artifact` mặc định nén; cân nhắc `compression-level: 0` |
-| CI-10 | **Workflow build upstream thay vì repo mình** | 0.3.2 — **fix bắt buộc** |
-| CI-11 | `VBOX_WITHOUT_ADDITIONS=1` chặn PR-2 | 0.4.2 |
+| CI-10 | Workflow build upstream | ✅ **đã sửa** — `build.yml:42` dùng `${{ github.repository }}` |
+| CI-11 | `VBOX_WITHOUT_ADDITIONS=1` chặn PR-4 | 0.4.2 |
 | CI-12 | `LocalConfig.kmk` bị ghi đè mỗi run | OK — file nằm trong `.gitignore`, sinh lại mỗi job |
+| CI-13 | Hosted runner không có `VBoxDrv`/nested virt | T3 phải chạy self-hosted; `smoke` hosted chỉ T1/T2 |
+| CI-14 | `collect-identity.ps1` skip runtime | Bắt buộc `-RequireRuntime` ở T3; không dùng exit 0 khi thiếu runtime |
+| CI-15 | Chưa có job `t3-runtime`/guest collector trong workflow | Task `0.4.3a-c`; gate `0.4.4` |
+| CI-16 | Comparator mask hex có thể che identity thật | Dùng schema comparator + negative tests §4.7.4.1 |
+| CI-17 | T3 artifact có thể chứa serial/UUID | Redaction/isolation §4.7.4.2; không upload raw dump |
 
-#### 4.7.9 Lỗi CI lần 1 (run `39571032952`) và cách sửa
+#### 4.7.9 Lịch sử lỗi CI và cách sửa
 
+> **Đây là lịch sử, không phải trạng thái hiện tại.** Các lỗi dưới đây đã được xử lý; giữ lại để tránh tái phạm.
+>
 > Run đầu tiên sau khi sửa checkout: `https://github.com/vuong4-design/virtualbox/actions/runs/39571032952`
 > → `build` **fail**, `full-additions` **fail**, `smoke` skipped.
 
@@ -1183,8 +1436,8 @@ Exception: collect-identity.ps1:173
 |---|---|
 | Verify binary đã build | **Quét chuỗi identity** trong `VBoxDD.dll` / `VBoxVMM.dll` / `VBoxC.dll` / `VirtualBox.exe` → `.github/scripts/scan-identity.ps1` → artifact `binary-identity.txt` (baseline để diff giữa 2 commit) |
 | Verify config plane | `VBoxManage createvm` + `showvminfo --machinereadable` (không cần `VBoxDrv`) — phần này **vẫn chạy được** |
-| Verify runtime plane | `collect-identity.ps1` tự dò `VBoxDrv`; nếu không có → ghi `RUNTIME_TARGET_UNAVAILABLE` và **exit 0** (không phải lỗi). Dùng `-RequireRuntime` để bắt buộc (chạy local/self-hosted) |
-| Yêu cầu "identity ổn định 2 lần mở VM" | **Chuyển sang test unit** cho phần selector của MPE (Phase 1.0) — hàm thuần `hash(vmUuid) → profile` test được mà không cần VM. Xem §4.6.4 |
+| Verify runtime plane | `collect-identity.ps1` tự dò `VBoxDrv`; nếu không có → ghi `RUNTIME_TARGET_UNAVAILABLE` và **exit 0** (chỉ chấp nhận ở `smoke` T1/T2). T3 dùng `-RequireRuntime` và **fail** nếu thiếu driver/VT-x |
+| Yêu cầu "identity ổn định 3 lần mở VM" | **Unit test selector** (Phase 1.0) + **T3 3 boot**; hàm thuần `hash(vmUuid) → profile` test được mà không cần VM. Xem §4.6.4 |
 
 > Ghi chú: thuật ngữ `RUNTIME_TARGET_UNAVAILABLE` cố ý dùng y hệt phân loại Pass 129 trong tài liệu
 > phân tích cloak — cùng một bài toán: host phân tích không có runtime target để capture.
@@ -1306,14 +1559,16 @@ thêm gói debugger ~1.5 GB.)
 
 | # | Task | File | Nghiệm thu |
 |---|---|---|---|
-| 0.1 | Tạo branch `feature/cloak` từ `VBox-7.2` | — | `git branch` |
+| 0.1 | Tạo integration branch `feature/cloak` + PR-1 branch `feature/cloak-foundation` từ `VBox-7.2` | — | `git branch` |
 | 0.2 | Chứng minh build Windows **cục bộ** chạy được | `configure.vbs` → `env.bat` + `AutoConfig.kmk` | Build sạch không lỗi |
 | 0.3 | **Sửa workflow CI** (checkout + trigger + revision log) | `.github/workflows/build.yml` | ✅ **đã làm** — xem [§4.7.7](#477-danh-sách-task-ci-cụ-thể-phase-0) |
-| 0.4 | Thêm job `smoke` | `.github/workflows/build.yml`, `.github/scripts/collect-identity.ps1`, `.github/scripts/scan-identity.ps1` | ✅ **đã làm** — nhưng **runner GH không chạy được VM** (không có VBoxDrv / nested virt) → đã đổi sang: quét binary + config plane; runtime plane tự dò `VBoxDrv` và skip nếu không có |
-| 0.4b | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — WDK cài được nhưng **treo** ở bước install → đã thêm timeout (25 phút) + thu thập log WiX Burn |
-| 0.5 | Rewrite path pcbios ↔ efi trong CFGM overlay | `ConsoleImplConfigCommon.cpp:724-843` | Set `VBoxInternal/Devices/pcbios/0/Config/DmiBIOSVendor` → guest thấy ở cả BIOS và EFI mode |
-| 0.6 | Hạ tầng test: script so sánh guest-visible identity giữa 2 build | `.github/scripts/collect-identity.ps1` ✅ (phần CI) | Chạy được trên VM Windows + Linux |
+| 0.4 | Thêm T1/T2 (binary + config plane) | `.github/workflows/build.yml`, `.github/scripts/collect-identity.ps1`, `.github/scripts/scan-identity.ps1` | ✅ **đã làm** — hosted runner không chạy VM; T1/T2 là gate chính |
+| 0.4b | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** — WDK dùng MSI/CAB trực tiếp; chờ run xác nhận |
+| 0.4c | Thêm T3 runtime self-hosted | `.github/workflows/build.yml` + `.github/scripts/collect-identity.ps1`, `collect-guest-identity.*`, `compare-identity.*` | ⬜ **chưa làm** — job `t3-runtime`, 3 boot, guest Windows + Linux, schema comparator |
+| 0.5 | **Xác minh** path pcbios ↔ efi trong CFGM overlay (không sửa identity ở PR-1) | `ConsoleImplConfigCommon.cpp:724-843` | Ghi nhận key nào áp dụng cho BIOS/EFI; implementation chuyển sang PR-2 |
+| 0.6 | Hạ tầng test: so sánh guest-visible identity giữa 2 build | `.github/scripts/collect-identity.ps1`, guest collector, comparator | T3 chạy 3 boot, Windows + Linux, schema comparator + negative tests |
 | 0.7 | Baseline identity để so sánh (artifact từ build stock) | artifact `cloak-identity-report` | Có 1 bộ giá trị reference cho VM mẫu |
+| 0.8 | Chốt `stock` vs `cloak` build, asset build-time và `BuildIdentityManifest` | `Config.kmk` / tài liệu build | Không còn tuyên bố “off = stock”; manifest sinh cho mỗi build mode |
 
 **Ghi chú build:** repo **không có** `BUILDING-WIN32.md` (chỉ có `README.md`, `CONTRIBUTING.md`, `SECURITY.md`). Quy trình cục bộ:
 
@@ -1332,70 +1587,84 @@ Chi tiết CI: xem [§4.7](#47-ci-bằng-github-actions-quyết-định-4).
 
 | # | Task | File | Nghiệm thu |
 |---|---|---|---|
-| 1.0.1 | Khung `MACHINEPROFILE` + registry 3 profile | `src/VBox/Main/src-client/ConsoleImplConfigCloak.h` (mới) | Compile, không lỗi |
-| 1.0.2 | PRNG `splitmix64` + FNV1a64 seed từ VM UUID | `ConsoleImplConfigCloak.cpp` (mới) | Unit test: cùng UUID → cùng output |
-| 1.0.3 | `MPE::materialize()` → ghi CFGM vào node `Devices/cloak/0/Config/*` | `ConsoleImplConfigCloak.cpp` | `VBoxManage showvminfo` hiện đúng giá trị |
-| 1.0.4 | Tích hợp vào `i_configConstructorX86` | `ConsoleImplConfigX86.cpp:383` (trước dòng 2055) | Giá trị tới được device |
-| 1.0.5 | Bộ luật coherence C1–C10 (assertion lúc init) | `ConsoleImplConfigCloak.cpp` | Profile vi phạm → log rõ + fail sớm |
-| 1.0.6 | Lint offline toàn bộ profile registry | script test | Không profile nào vi phạm C1–C10 |
-| 1.0.7 | Cơ chế ép profile cụ thể (`Devices/cloak/0/Config/Profile`) | `ConsoleImplConfigCloak.cpp` | Set ExtraData → profile cố định |
-| 1.0.8 | Cơ chế bật/tắt (`Devices/cloak/0/Config/Enabled`) — **mặc định tắt** | `ConsoleImplConfigCloak.cpp` | Không bật → VirtualBox y hệt stock |
+| 1.0.1 | Khung `MACHINEPROFILE` + registry **rỗng** + `test-profile-synthetic` | `src/VBox/Main/src-client/ConsoleImplConfigCloak.h` (mới) | Compile; registry production không có `DRAFT` |
+| 1.0.2 | `CloakSeed` + HMAC-SHA-256 + UUID salt + `splitmix64` stream | `ConsoleImplConfigCloak.cpp` (mới) | Unit test: cùng seed + UUID → cùng output; khác seed → khác output |
+| 1.0.2a | **Provision/consume seed** tách khỏi startup; fail nếu thiếu seed | CLI/Main API + `ConsoleImplConfigCloak.cpp` | Provision VM off → persist; start với seed thiếu → fail rõ |
+| 1.0.3 | `MPE::materialize()` → ghi CFGM vào node thật `Devices/<dev>/0/Config/*` | `ConsoleImplConfigCloak.cpp` | `debugvm info pci verbose` + DMI/ACPI collector; **không** dùng `showvminfo` |
+| 1.0.4 | Tích hợp **sau** `i_configCfgmOverlay` | `ConsoleImplConfigX86.cpp:2055` | User override thắng; key thiếu mới được điền |
+| 1.0.4a | `validateEffectiveConfig()` sau materialize, trên CFGM thực tế | `ConsoleImplConfigCloak.cpp` | Override conflict STRICT → fail; HEURISTIC → warn; không đè user |
+| 1.0.5 | Bộ luật coherence C1–C13 + severity STRICT/HEURISTIC | `ConsoleImplConfigCloak.cpp` + unit test | Mỗi rule có positive/negative test; profile vi phạm fail/warn đúng mức |
+| 1.0.6 | Lint offline toàn bộ profile registry + provenance + class | script test | Không `DRAFT`/`RESEARCH_ONLY` selectable; `COMPATIBLE` không có STRICT violation |
+| 1.0.7 | Cơ chế ép profile cụ thể (`VBoxInternal/Cloak/Profile`) | `ConsoleImplConfigCloak.cpp` | Set ExtraData → profile đã verify; không bypass manifest |
+| 1.0.8 | Bật/tắt (`VBoxInternal/Cloak/Enabled`) — **mặc định tắt** | `ConsoleImplConfigCloak.cpp` | Chỉ tắt runtime; build-time asset vẫn theo build mode |
+| 1.0.9 | Phân loại binding/cosmetic + allowlist driver | `ConsoleImplConfigCloak.cpp` | Binding ID không random; profile vi phạm bị reject |
+| 1.0.10 | `BUILDIDENTITYMANIFEST` + `build-identity.json` | build system + `ConsoleImplConfigCloak.cpp` | Profile family/chipset/binding khớp manifest; mismatch fail |
+| 1.0.11 | Profile class `COMPATIBLE`/`RESEARCH_ONLY` + device feasibility check | registry + linter | Chỉ `COMPATIBLE` selectable production |
+| 1.0.12 | Saved-state/snapshot guard: seed hash + profile ID + manifest hash | `ConsoleImplConfigCloak.cpp` + SSM | Restore mismatch → fail rõ; không trộn identity; test §4.6.5 |
 
 ### Phase 1 — Tier 1: CPU / firmware (giá trị cao nhất)
 
 | # | Task | File:line | Giá trị đích | Rủi ro |
 |---|---|---|---|---|
-| 1.1 | Hyper-V vendor | `GIMR3Hv.cpp:245-248` | `"Microsoft   "` (12 ký tự) | Thấp |
-| 1.2 | HVP suppression | `target-x86/CPUMR3CpuId-x86.cpp:4017-4026` | clear HVP thay vì set | **Cao** |
-| 1.3 | CPU DB profile | `CPUMR3Db.cpp:154` | profile CPUID thật, **không** copy brand string của fork | Cao |
+| 1.1 | Hyper-V vendor (chỉ `HyperV` mode) | `GIMR3Hv.cpp:245-248` | `"Microsoft   "` (12 ký tự) + leaves đầy đủ | Thấp |
+| 1.2 | HVP presentation (một design với 1.1) | `target-x86/CPUMR3CpuId-x86.cpp:4017-4026` | `Hidden`: HVP=0 + không leaves; `HyperV`: HVP=1 + leaves | **Cao** |
+| 1.3 | CPU DB profile | `CPUMR3Db.cpp:154` | profile CPUID thật, **không** copy brand string của fork; chờ O4 | Cao |
 | 1.4 | SMBIOS Type 11 suppression | `DevFwCommon.cpp:977-999` | `DmiOEMVBoxVer/Rev` default `""` | Thấp |
 | 1.5 | SMBIOS Type 17/19/8 | `DevFwCommon.cpp:889-975` + code mới | key `DmiMemDev`, `DmiPortConnectors` | Trung bình |
-| 1.6 | Anti-detect gate | `DevFwCommon.cpp:487` | cờ `CloakEnabled` | Thấp |
-| 1.7 | Default DMI vendor/product | `DevFwCommon.cpp:64-95` | (chốt ở §10) | Thấp |
-| 1.8 | ACPI OEM/Creator theo UUID | `DevACPI.cpp:4670-4697` | bảng 5 + bảng 4 | Thấp |
-| 1.9 | ACPI OEM Table ID | `DevACPI.cpp:4680-4687`, `:2918-2931` | `"A M I "` | Thấp |
-| 1.10 | DSDT rebrand | `PC/vbox.dsl:28` | `ACRSYS` / `ACRPRDCT` | Thấp |
+| 1.6 | Anti-detect gate | `DevFwCommon.cpp:487` | Thay `Flags & 0x1337` bằng `/Cloak/Enabled` (không dùng license gate) | Thấp |
+| 1.7 | Default DMI vendor/product | `DevFwCommon.cpp:64-95` | Theo profile đã verify; **O4 blocker**, không hardcode | Thấp |
+| 1.8 | ACPI OEM/Creator | `DevACPI.cpp:4670-4697` | Theo profile, **không** random theo UUID | Thấp |
+| 1.9 | ACPI OEM Table ID | `DevACPI.cpp:4680-4687`, `:2918-2931` | Theo profile (e.g. `"A M I "` nếu AMI) | Thấp |
+| 1.10 | DSDT rebrand | `PC/vbox.dsl:28` | Theo **build-time firmware family**; không dùng `ACRSYS` cho Lenovo/Dell | Thấp |
 | 1.11 | Battery `_BIF` | `PC/vbox.dsl:1491-1495` | `i2battery` / `INTEL` | Thấp |
-| 1.12 | DSDT CPU0 + thermal + voltage | `PC/vbox.dsl` + `DevACPI.cpp` | AML theo §8.3-8.5 | Trung bình |
+| 1.12 | DSDT CPU0 + thermal + voltage | `PC/vbox.dsl` + `DevACPI.cpp` | AML theo §3.3 (8.3-8.5); DSDT build-time, handler runtime | Trung bình |
 | 1.13 | MPS rebrand | `DevFwCommon.cpp:1128-1133` | `INTELCPU` / `Intel` | Thấp |
-| 1.14 | PC BIOS AMI | `PC/BIOS/orgs.asm:86-87`, `bios.c:74`, `logo.c:477` + 3 `.asm` | `American Megatrends V3.10` | Trung bình (`.asm` là generated) |
+| 1.14 | PC BIOS rebrand | `PC/BIOS/orgs.asm:86-87`, `bios.c:74`, `logo.c:477` + 3 `.asm` | Build-time vendor family; nội dung chọn sau O4 | Trung bình (`.asm` generated) |
 | 1.15 | **Fix leak F12** | `PC/BIOS/logo.c:477` + 3 `.asm` | bỏ `VirtualBox` | Thấp |
-| 1.16 | VGA BIOS → NVIDIA | `Graphics/BIOS/vbe.c:88-97`, `vgabios.c:99` + 3 `.asm` | chuỗi NVIDIA | Trung bình |
+| 1.16 | VGA BIOS VBE vendor | `Graphics/BIOS/vbe.c:88-97`, `vgabios.c:99` + 3 `.asm` | Build-time family; NVIDIA chỉ nếu build NVIDIA, AMD profile cần build khác | Trung bình |
 | 1.17 | **Fix leak raw VGA ROM** | `Graphics/BIOS/VBoxVgaBiosAlternative*.asm` | bỏ `Antidetect5` / `VirtualBox` | Thấp |
-| 1.18 | UEFI `FirmwareVendor` | `OvmfPkg/OvmfPkgX64.dsc` (override) | `L"ASUS"` | Trung bình (cần EDK2 build) |
+| 1.18 | UEFI `FirmwareVendor` | `OvmfPkg/OvmfPkgX64.dsc` (override) | Build-time family, đồng bộ BIOS/ACPI; **không** hardcode `L"ASUS"` | Trung bình (cần EDK2 build) |
 | 1.19 | ACPI PM `VenDevId` | `DevACPI.cpp:4881-4882` | key override | Thấp |
 
 **Ràng buộc kỹ thuật quan trọng:**
 
+- **HVP**: 1.1 và 1.2 phải merge cùng PR; không merge riêng lẻ. `Hidden` không dùng `GIMR3Hv`; `HyperV` không clear HVP.
 - **BIOS / VGA BIOS**: file `.asm` checked-in là **artifact sinh ra** từ nguồn gốc
   (`PC/BIOS/Makefile.kmk:136-165`, `Graphics/BIOS/Makefile.kmk:71-104`).
-  → Phải sửa **cả** nguồu gốc (`.asm` gốc, `logo.c`, `vbe.c`, `vgabios.c`) **và** file `.asm` đã flatten, nếu không lần regenerate sẽ mất patch.
+  → Phải sửa **cả** nguồn gốc (`.asm` gốc, `logo.c`, `vbe.c`, `vgabios.c`) **và** file `.asm` đã flatten, nếu không lần regenerate sẽ mất patch.
 - **DSDT**: build được trong tree — `bldRTIasl` build từ `src/VBox/Runtime/tools/RTIasl.cpp` (`src/VBox/Runtime/tools/Makefile.kmk:82-88`), `Config.kmk:2532` (`VBOX_RTIASL`), `Devices/Makefile.kmk:917-919`.
 - **UEFI**: build OVMF riêng (`Devices/EFI/Firmware/Makefile.kmk:435-453`, `ACTIVE_PLATFORM = OvmfPkg/OvmfPkgX64.dsc`).
+- **Build-time asset**: 1.10-1.18 là thay đổi asset, **không** tắt được bằng `CloakEnabled`; thuộc `cloak` build mode. Không hứa “off = stock”.
+- **Một build = một firmware family**: DSDT/BIOS/VGA/OVMF là global; không thể mỗi VM một hãng. Runtime profile phải khớp family của build hoặc fail C1/C3/C4.
+- **UEFI per-VM**: `ConsoleImplConfigX86.cpp:1571-1575` dùng tên firmware cố định; không có override per-VM. 1.18 là thay đổi toàn cục cho mọi VM dùng OVMF trong build đó.
 
 ### Phase 2 — Tier 2: device identity
 
+> Phase 2 phải tuân §4.5.8: binding cứng không random; binding mềm chỉ chọn từ allowlist đã test; cosmetic mới random. Không task nào được đổi primary ID của VMMDev/VGA/VirtIO mà không có driver tương ứng.
+
 | # | Task | File:line | Giá trị đích |
 |---|---|---|---|
-| 2.1 | GPU `GpuModelId` | `Graphics/DevVGA.cpp:6829-6843` | VID<<48\|DID<<32\|SVID<<16\|SID |
+| 2.1 | GPU `GpuModelId` | `Graphics/DevVGA.cpp:6829-6843` | Chỉ dùng khi có WDDM strategy; nếu không, giữ `80EE:BEEF` |
 | 2.2 | VMSVGA `CMD_BUFFERS_2` | `Graphics/DevVGA-SVGA.cpp:8074-8089` | bỏ bit 0x04000000 |
-| 2.3 | HDA codec/subsystem | `Audio/DevHdaCodec.cpp:801-804`, `Audio/DevHda.cpp:5138-5141` | bảng 32 VID:DID theo UUID |
+| 2.3 | HDA codec/subsystem | `Audio/DevHdaCodec.cpp:801-804`, `Audio/DevHda.cpp:5138-5141` | bảng hợp lệ theo profile, không dùng tuple lỗi |
 | 2.4 | PIIX3 ATA model | `Storage/DevATA.cpp:8231-8232` | `Samsung PRO 970` / `Samsung CD-ROM` |
-| 2.5 | AHCI controller | `Storage/DevAHCI.cpp:5769-5770` | `8086:8C82` |
-| 2.6 | AHCI model/serial/INQUIRY | `Storage/DevAHCI.cpp:5414-5456` | `SanDisc Extreme Pro`, `SD%xSSDE`, `SanDisk/Extreme/1.0` |
+| 2.5 | AHCI controller | `Storage/DevAHCI.cpp:5769-5770` | Profile-derived; `8086:8C82` chỉ đúng cho 8-series, không dùng cho Tiger Lake |
+| 2.6 | AHCI model/serial/INQUIRY | `Storage/DevAHCI.cpp:5414-5456` | Model/serial/INQUIRY phải cùng hãng; dùng `pszStorageSerial` |
 | 2.7 | HostDVD inquiry | `Storage/DrvHostDVD.cpp:366-368` | `Hitachi/CD-ROM/1.0` |
-| 2.8 | USB HID VID + override | `Input/UsbKbd.cpp:125-127,326-329`, `Input/UsbMouse.cpp:65-69,351-355` | `3938` + 3 key mới |
+| 2.8 | USB HID VID + override | `Input/UsbKbd.cpp:125-127,326-329`, `Input/UsbMouse.cpp:65-69,351-355` | `3938` + 3 key mới; không đổi driver binding |
 | 2.9 | USB webcam | `Video/UsbWebcamDesc.cpp:793-794,925-927` | `046D:0825 / Logitech / HD Webcam C270` |
 | 2.10 | USB MSD | `Storage/UsbMsd.cpp:59-61,282-284` | `3938` / `Seagate` |
-| 2.11 | OHCI `VenDevId` | `USB/DevOHCI.cpp:6001-6005` | key override |
-| 2.12 | xHCI PantherPoint | `USB/DevXHCI.cpp:8052` | `8086:8D31` |
-| 2.13 | i440FX + PIIX3 ISA | `Bus/DevPCI.cpp:1353-1355`, `:1365-1366` | `0400:1237`, `8086:0484` |
-| 2.14 | **VMMDev** | `VMMDev/VMMDev.cpp:4844-4847` | `8086:1551` |
-| 2.15 | ACPI PM `VenDevId` | `PC/DevACPI.cpp:4881-4882` | key override |
-| 2.16 | VirtIO vendor | `VirtIO/VirtioCore.h:261`, `VirtioCore.cpp:3073-3084` | `0x10EC` |
-| 2.17 | virtio-net Realtek DID | `Network/DevVirtioNet.cpp:3698-3705` | 11 DID theo MAC |
-| 2.18 | E1000 subsystem + EEPROM | `Network/DevE1000.cpp:267-281`, `:706-717` | `85F0:1043` |
-| 2.19 | TPM `INTC/CSME/PTT` | `src/libs/libtpms-0.10.2/src/tpm2/VendorInfo.c:71-77` | 4 hằng |
+| 2.11 | OHCI `VenDevId` | `USB/DevOHCI.cpp:6001-6005` | Chỉ override nếu khớp profile; `106B:003F` là Apple, không dùng cho Lenovo |
+| 2.12 | xHCI | `USB/DevXHCI.cpp:8052` | Profile-derived; không hardcode `8086:8D31` cho Tiger Lake/Coffee Lake |
+| 2.13 | i440FX + PIIX3 ISA | `Bus/DevPCI.cpp:1353-1355`, `:1365-1366` | **Giữ stock** `8086:1237` / `8086:7000`; không dùng `0400:1237` / `8086:0484` |
+| 2.14 | **VMMDev** | `VMMDev/VMMDev.cpp:4844-4847` | **Deferred**: giữ `80EE:CAFE`; đổi toàn cục cùng GA + ký mới |
+| 2.15 | ACPI PM `VenDevId` | `PC/DevACPI.cpp:4881-4882` | key override; profile/allowlist |
+| 2.16 | VirtIO vendor | `VirtIO/VirtioCore.h:261`, `VirtioCore.cpp:3073-3084` | **Không thuộc baseline** — experimental, cần guest driver strategy |
+| 2.17 | virtio-net Realtek DID | `Network/DevVirtioNet.cpp:3698-3705` | **Không thuộc baseline** — Realtek + virtio caps là fingerprint |
+| 2.18 | E1000 subsystem + EEPROM | `Network/DevE1000.cpp:267-281`, `:706-717` | `1043:85F0` (SVID:SID); verify endian/EEPROM |
+| 2.19 | TPM `INTC/CSME/PTT` | `src/libs/libtpms-0.10.2/src/tpm2/VendorInfo.c:71-77` | 4 hằng; chỉ dùng với CPU Intel; **defer PR-6** cùng libtpms |
+
+**Loại khỏi baseline:** 2.16 và 2.17. Nếu muốn thử, tách branch `experimental/virtio-realtek`; phải test Linux `virtio_pci` + Windows NetKVM/viostor trước khi merge. Không đưa vào PR-3.
 
 ### Phase 3 — Guest Additions camouflage
 
@@ -1412,6 +1681,8 @@ Thứ tự: **đổi host trước, guest sau** (hoặc song song trong cùng bu
 | 3.5 | `Additions/common/VBoxControl/VBoxControl.cpp` + installer |
 | 3.6 | `Additions/win/Graphics/Video/mp/{xpdm/VBoxVideo.inf, wddm/VBoxWddm.inf}` |
 | 3.7 | `Additions/win/VBoxCredProv/` (WhomNP) |
+| 3.8 | Test lifecycle GA: install mới, upgrade từ GA stock, uninstall, rollback; Windows 10/11 + Secure Boot, Linux GA |
+| 3.9 | Test ký driver và load sau reboot; không coi chữ ký là bằng chứng lifecycle |
 
 ### Phase 4 — Guest provisioning / UI runtime actions
 
@@ -1420,26 +1691,28 @@ Thứ tự: **đổi host trước, guest sau** (hoặc song song trong cùng bu
 | 4.1 | Thêm slot `sltAntiOS*` vào `Frontends/VirtualBox/src/runtime/UIMachineLogic.h/.cpp` |
 | 4.2 | Đăng ký action `AntiOS*` vào `Frontends/VirtualBox/src/globals/UIActionPoolRuntime.cpp` |
 | 4.3 | Payload Guest Control: TCP fingerprint (M1D/M1D1), hop tuner, IPv6, firewall, browser hardened, GPS |
+| 4.4 | Test quyền: user thường vs elevated; không yêu cầu quyền cao hơn stock nếu không có lý do |
+| 4.5 | Test rollback: provisioning lỗi giữa chừng phải khôi phục guest state; không để guest nửa vời |
 
 **Lưu ý phạm vi:** chỉ port các action **không** phụ thuộc payload bên ngoài đã bị AV quarantine hoặc chặn dịch vụ bên thứ ba (AutoKMS, hosts-blocklist anti-fraud). Các payload đó nằm ở `cloak/Iso/etc/`, không phải mã nguồn VirtualBox.
 
-### Phase 5 — Cross-layer coherence
+### Phase 5 — Cross-layer coherence (gate từng slice, không phải phase cuối)
 
-Sửa các mâu thuẫn §2.3. **Không để cuối** — càng sửa nhiều plane độc lập càng dễ tạo mâu thuẫn mới.
+Coherence **không phải** phase dọn dẹp. Mỗi vertical slice (PR-2, PR-3) phải pass coherence gate trước khi merge; Phase 5 chỉ còn residual/edge case.
 
-| Mâu thuẫn | File:line |
-|---|---|
-| F12 còn `VirtualBox` | `PC/BIOS/logo.c:477` + 3 `.asm` |
-| Raw VGA ROM còn `Antidetect5` | `Graphics/BIOS/VBoxVgaBiosAlternative*.asm` |
-| USB MSD `Seagate` vs VSCSI `VBOX` | `Storage/VSCSI/VSCSILunSbc.cpp:248-250`, `VSCSILunMmc.cpp:1146-1148` |
-| PIIX3 optical IDENTIFY vs INQUIRY | `Storage/DevATA.cpp:2431-2433` |
-| AHCI optical `Toshiba` vs `SanDisk` | `Storage/DevAHCI.cpp:5436-5456` |
-| SSD model vs nonrotational/TRIM/SMART | `Storage/DevATA.cpp`, `Storage/DevAHCI.cpp` (word 217/169) |
-| VirtIO-SCSI `10EC:1048` | `VirtIO/VirtioCore.cpp:3073-3084` (ngoại lệ theo device type) |
-| E1000 PCI vs EEPROM thứ tự field | `Network/DevE1000.cpp:277` vs `:706-717` |
-| TPM `INTC` vs libtpms cũ | `src/libs/libtpms-0.10.2/` — cần nâng version |
-| HDA tuple vs chipset đời | cần bảng profile coherence |
-| VMMDev `8086:1551` vs INF `PCI\VEN_80ee&DEV_cafe` | `Additions/common/VBoxGuest/win/VBoxGuest.inf:63` |
+| Mâu thuẫn | File:line | Xử lý |
+|---|---|---|
+| F12 còn `VirtualBox` | `PC/BIOS/logo.c:477` + 3 `.asm` | PR-2, sửa asset |
+| Raw VGA ROM còn `Antidetect5` | `Graphics/BIOS/VBoxVgaBiosAlternative*.asm` | PR-2, sửa asset |
+| USB MSD `Seagate` vs VSCSI `VBOX` | `Storage/VSCSI/VSCSILunSbc.cpp:248-250`, `VSCSILunMmc.cpp:1146-1148` | PR-3 |
+| PIIX3 optical IDENTIFY vs INQUIRY | `Storage/DevATA.cpp:2431-2433` | PR-3 |
+| AHCI optical `Toshiba` vs `SanDisk` | `Storage/DevAHCI.cpp:5436-5456` | PR-3 |
+| SSD model vs nonrotational/TRIM/SMART | `Storage/DevATA.cpp`, `Storage/DevAHCI.cpp` (word 217/169) | PR-3 |
+| E1000 PCI vs EEPROM thứ tự field | `Network/DevE1000.cpp:277` vs `:706-717` | PR-3 |
+| TPM `INTC` vs libtpms cũ | `src/libs/libtpms-0.10.2/` | PR-6, tách khỏi PR-3 |
+| HDA tuple vs chipset đời | cần bảng profile coherence | PR-3 |
+| VMMDev `8086:1551` vs INF `PCI\VEN_80ee&DEV_cafe` | `Additions/common/VBoxGuest/win/VBoxGuest.inf:63` | **Không đổi VMMDev** trong baseline; nếu đổi, PR-4 + ký lại |
+| HVP=0 + Hyper-V leaves | `GIMR3Hv.cpp`, `CPUMR3CpuId-x86.cpp` | PR-2; fail coherence C11 |
 
 ### Phase 6 — Verification
 
@@ -1447,7 +1720,7 @@ Reuse đúng các collector mà tài liệu đã viết và self-test sẵn (t�
 
 | Collector | File | Kiểm tra |
 |---|---|---|
-| PCI final sink (Pass 118) | `pass118_pci_runtime_analyze.py` | `debugvm <vm> info pci verbose` → `10EC:*` + virtio cap chain; `8086:1551` + BAR0 size `0x20` |
+| PCI final sink (Pass 118) | `pass118_pci_runtime_analyze.py` | `debugvm <vm> info pci verbose` → binding ID đúng (VMMDev `80EE:CAFE` mặc định); VirtIO vẫn `1AF4` nếu dùng; không có tuple giả |
 | CPU topology (Pass 124) | `pass124_cpu_topology_*.py` | CPUID `0/1/4/0xb/0x80000000/0x80000002-04/0x80000008/0x8000001d/0x8000001e` + APIC/x2APIC + core/package |
 | Cert residue (Pass 123) | `pass123_cert_store_*` | thumbprint `6FE993BC8729F84CF60684BB1D8BD1CC3CB2D004` |
 | SHFL (Pass 125/128) | `pass125_*`, `pass128_sharedfolder_passive_log_analyze.py` | `uRootIdVer` |
@@ -1464,7 +1737,7 @@ Reuse đúng các collector mà tài liệu đã viết và self-test sẵn (t�
 2. VM boot được (Windows + Linux).
 3. Collector tương ứng cho thấy giá trị mới.
 4. Matrix row tương ứng chuyển `RUNTIME_UNVERIFIED` → `FORK_CHANGED_CONFIRMED` trong `antios_coverage_proof_matrix_v1.json`, hoặc có bằng chứng runtime cụ thể ghi vào evidence file.
-5. Không sinh mâu thuẫn mới ở Phase 5.
+5. Pass coherence gate của slice hiện tại (C1–C13); Phase 5 chỉ còn residual.
 
 ---
 
@@ -1481,18 +1754,27 @@ MachineProfile {
   storage:  {controller, model family, INQUIRY vendor, nonrotational/TRIM/SMART}
   net:      {VID/DID/SVID/SID, EEPROM, INF, provider strings}
   tpm:      {manufacturer, firmware, PCR properties}
+  binding:  {VMMDev, VGA/WDDM, VirtIO}   # build-level, không random
+  build:    {mode, firmwareFamily, assetHash, buildHash}
+  profile:  {class, supportedChipsets, requiredFirmwareFamily}
+  state:    {seedHash, profileId, manifestHash}
+  provenance:{source, model, BIOS version, date, hash}
   guest:    {GA service names, file names, PnP provider, WMI}
 }
 ```
 
 Check tự động:
-- chipset generation đồng nhất (e.g. `0400:1237` AMD + `8086:8D31` xHCI Intel = lệch đời)
-- ACPI OEM ID (`AMI`/`INTEL`/`ASUS`/`HP`) khớp SMBIOS vendor và firmware vendor
-- CPU generation khớp chipset (Core2-era CPUID + chipset đời 8xx)
-- storage model family đồng nhất giữa IDENTIFY và INQUIRY
-- SSD model ⟺ nonrotational + TRIM + SMART
-- GPU vendor khớp VBE vendor khớp EDID manufacturer
-- TPM manufacturer khớp firmware version
+- CPU generation ↔ chipset: kiểm theo allowlist, không dùng `8086:1237` + CPU Tiger Lake như một máy laptop
+- ACPI OEM/creator ↔ SMBIOS/firmware: **heuristic + allowlist**, không bắt buộc trùng tuyệt đối
+- Storage model family đồng nhất giữa IDENTIFY và INQUIRY; SSD ⟺ nonrotational + TRIM + SMART
+- GPU PCI ↔ VBE **build-time asset**: strict
+- EDID ↔ display identity: **heuristic**, không bắt buộc trùng GPU
+- TPM manufacturer ↔ CPU/firmware: **heuristic**, cho phép dTPM
+- HVP bit ↔ vendor/leaves/GIM provider: strict
+- Binding ID ↔ driver/INF: strict; profile `DRAFT`/`RESEARCH_ONLY`/thiếu provenance bị reject
+- Effective CFGM sau user override phải pass lại C1–C13; override conflict strict → fail, heuristic → warn
+- Profile family/chipset/binding phải khớp `BUILDIDENTITYMANIFEST`
+- Profile chỉ dùng dữ liệu từ một máy thật; nếu không, ghi rõ residual
 
 ---
 
@@ -1526,15 +1808,16 @@ Khoản cần thiết khác:
 
 Theo quyết định #4, **CI là đường build chính**; local chỉ để debug nhanh.
 
-Repo **đã có** workflow `.github/workflows/build.yml` (310 dòng, chưa commit) build VirtualBox 7.2 Windows x64 trên `windows-2022`:
+Repo **đã có** workflow `.github/workflows/build.yml` (1000 dòng, đã commit) build VirtualBox 7.2 Windows x64 trên `windows-2022`:
 
 | Job | Nội dung | Dependency cài thêm |
 |---|---|---|
-| `build` (hiện có) | Toàn bộ + GUI (Qt 6.8.0) — **trừ** Guest Additions (`VBOX_WITHOUT_ADDITIONS=1`) | yasm, Qt 6.8.0, SDL 1.2.15 |
-| `smoke` (thêm) | Chạy `VBoxManage` / `debugvm info pci verbose` → artifact identity | — |
-| `full-additions` (thêm) | Build kèm Guest Additions (cần WDK) | WDK |
+| `build` | Toàn bộ + GUI (Qt 6.8.0) — **trừ** Guest Additions (`VBOX_WITHOUT_ADDITIONS=1`); sinh `build-identity.json` | yasm, Qt 6.8.0, SDL 1.2.15 |
+| `smoke` | T1/T2: scan binary + config plane + verify manifest; không chạy VM | — |
+| `full-additions` | Build kèm Guest Additions (cần WDK) | WDK 19041 MSI/CAB |
+| `t3-runtime` (kế hoạch) | T3: VM thật 3 boot + guest collector Windows/Linux | self-hosted runner có VT-x/VBoxDrv |
 
-**Fix bắt buộc trước khi dùng:** workflow đang checkout `repository: VirtualBox/virtualbox` → build upstream, **không** build code của bạn. Xem [§4.7.3](#473-lỗi-nghiêm-trọng-cần-sửa-trước-tiên).
+**Checkout đã sửa:** workflow dùng `repository: ${{ github.repository }}` tại `build.yml:42`, không còn build upstream. T3 runtime phải chạy self-hosted, xem [§4.7.4](#474-ba-tầng-kiểm-chứng-thay-cho-smoke-chạy-vm-trên-hosted-runner).
 
 Output: `out\win.amd64\release\bin` → artifact `virtualbox-7.2-windows-amd64-binaries`.
 
@@ -1563,16 +1846,21 @@ Tương tự cho Guest Additions — cần xác minh tên flag chính xác trong
 ### 8.1 Kiểm tra tĩnh (nhanh, mỗi task)
 
 ```powershell
-# PCI inventory
+# PCI inventory (VM đang chạy)
 VBoxManage debugvm "<vm>" info pci verbose
 
-# DMI/ACPI
+# Control plane (ExtraData), không phải CFGM nội bộ — lọc key, KHÔNG log seed
+VBoxManage getextradata "<vm>" enumerate | Select-String -NotMatch "Seed"
+
+# Chỉ là config summary, KHÔNG dùng để verify materialize
 VBoxManage showvminfo "<vm>" --machinereadable
 ```
 
+`showvminfo` không đọc CFGM nội bộ. Muốn verify MPE materialize, dùng `debugvm info pci verbose`, collector DMI/ACPI trong guest, hoặc thêm debug-info item `cfgm` test-only. Không chạy `getextradata enumerate` nguyên bản trong CI/artifact vì có thể lộ `CloakSeed`.
+
 ### 8.2 Kiểm tra runtime (theo collector)
 
-Chạy collector trong guest Windows, so với giá trị mong đợi. Script có sẵn ở `cloak/analysis_driverdiff/`.
+Chạy collector trong guest **Windows và Linux**, so với giá trị mong đợi. Script tham khảo ở `cloak/analysis_driverdiff/`; T3 dùng collector riêng theo §4.7.4.
 
 ### 8.3 Kiểm tra differential
 
@@ -1580,17 +1868,24 @@ Cùng một cấu hình VM, chạy lần lượt dưới:
 1. Build **stock** (baseline)
 2. Build **cloak**
 
-diff toàn bộ output collector. Mọi khác biệt phải map được về một task trong kế hoạch — khác biệt không giải thích được = regression.
+Dùng schema comparator §4.7.4.1, không diff raw text/mask hex. Chạy 3 boot cho mỗi build; mọi khác biệt phải map được về một task trong kế hoạch — khác biệt không giải thích được = regression. PR-1 phải có differential **bằng 0** (khi T3 sẵn sàng).
 
 ### 8.4 Regression check bắt buộc
 
 | Hệ | Check |
 |---|---|
 | Windows 10/11 | Boot, PnP không có device lỗi, driver GA load, GPU driver, audio, network, storage |
-| Linux (Debian/Ubuntu) | Boot, `lspci`, `lsusb`, `dmesg` không có "unknown device" |
-| VBoxManage | `showvminfo`, `list hdds`, `showvminfo --machinereadable` |
+| Linux (Debian/Ubuntu) | Boot, `lspci -k`, `lsusb`, `dmesg` không có "unknown device" |
+| Binding identity | VMMDev/VGA/virtio driver bind đúng; GA service/DLL hoạt động |
+| Hypervisor presentation | `CPUID.1:ECX[31]`, leaf `0x40000000..0x40000006`, `HypervisorPresent` nhất quán |
+| GA lifecycle | Cài mới, upgrade từ GA stock, uninstall, rollback; reboot + Secure Boot |
+| Saved state/snapshot | Restore không đổi identity; mismatch seed/profile/manifest → fail rõ |
+| Provisioning | Thiếu seed → fail; seed sai kích thước/bị sửa → fail; provision idempotent; VM đang chạy bị từ chối |
+| Build manifest | Profile family/chipset/binding khớp; build `stock` + cloak → fail |
+| VBoxManage | `showvminfo`, `list hdds`, `getextradata`, `debugvm info pci verbose` |
 | Shared clipboard / DnD / shared folder | Hoạt động sau khi đổi GA |
 | Guest Control | `VBoxControl` chạy được |
+| Seed/clone | `clonevm` new UUID → identity khác; mở lại 3 lần → giống hệt |
 
 ---
 
@@ -1598,52 +1893,64 @@ diff toàn bộ output collector. Mọi khác biệt phải map được về m�
 
 | # | Rủi ro | Mức | Giảm thiểu |
 |---|---|---|---|
-| R1 | Suppress HVP làm Hyper-V/KVM provider lỗi | **Cao** | Chỉ suppress khi provider = HyperV; giữ `EnableHVP` bật lại được. Test cả 3 provider |
+| R1 | HVP mode không nhất quán làm Hyper-V/KVM provider lỗi | **Cao** | `Hidden` dùng GIM `Minimal`/không GIM; `HyperV` giữ HVP=1 + leaves. Không trộn. Test cả 3 provider |
 | R2 | Đổi CPUID leaf/ID → guest BSOD (đặc biệt driver MSI) | **Cao** | Test Windows + Linux sau **mỗi** task Tier 1 |
 | R3 | Key CFGM mới không có trong whitelist → device không construct | Trung bình | Sửa whitelist **cùng lúc** với code đọc key |
 | R4 | `VBOX_VENDOR`/`VBOX_PRODUCT` đổi → đụng licensing, toàn bộ string sản phẩm | Trung bình | Sửa cục bộ trong `vbe.c`/`vgabios.c`, **không** sửa `Config.kmk` |
-| R5 | Tạo cross-layer mismatch mới (tệ hơn leak cũ) | **Cao** | Áp dụng Phase 5 cùng lúc, không để cuối |
+| R5 | Tạo cross-layer mismatch mới (tệ hơn leak cũ) | **Cao** | Coherence gate trong từng PR-2/PR-3; Phase 5 chỉ residual |
 | R6 | `.asm` BIOS bị regenerate mất patch | Trung bình | Commit cả nguồn + flatten; ghi rõ trong commit message |
 | R7 | EFI build cần toolchain riêng, lâu, khó debug | Trung bình | Làm sau các phase khác; tách PR riêng |
 | R8 | Đổi tên GA làm guest cũ không load được driver | Trung bình | Đồng bộ host+guest trong cùng build; version-gate |
 | R9 | Port CPUDB sai → CPUID incoherent | Cao | Dựng CPUID blob từ CPU thật, validate bằng Pass 116/124 |
 | R10 | Nâng libtpms lên version mới → hàng loạt diff | Trung bình | Tách PR riêng, không gộp Phase 1 |
-| R11 | GPL/về pháp lý | Thấp | VirtualBox là GPL; fork đã redistribute. Chỉ dùng cho mục đích kiểm thử/nghiên cứu |
-| R12 | **CI build nhầm repo** (upstream thay vì repo mình) | **Cao** | Đã xác định: `build.yml:25-31`. Fix bắt buộc ở task 0.3 — kiểm tra lại bằng artifact `configure.log`/`AutoConfig.kmk` sau khi sửa |
-| R13 | **CI không build được Guest Additions** (thiếu WDK) | Trung bình | `VBOX_WITHOUT_ADDITIONS=1` → job `full-additions` (task 0.4.2); nếu WDK trên runner công cộng không ổn định → self-hosted runner |
-| R14 | **MPE tạo giá trị không ổn định** (đổi mỗi lần mở VM) | **Cao** | Seed từ VM UUID + materialize đúng 1 lần; test "mở lại 3 lần" trong CI (task 0.6/0.7) |
-| R15 | **MPE tạo mâu thuẫn chéo** (profile sai quy tắc) | Cao | Luật C1–C10 assert lúc init + lint offline (task 1.0.5, 1.0.6) |
-| R16 | **`.asm` BIOS bị regenerate trong CI** → mất patch | Trung bình | §7.3 — không cài OpenWatcom, không regenerate |
-| R17 | **PR lớn, khó review** | Trung bình | 4 PR theo §10.1; mỗi PR có 1 tầng kiểm chứng rõ ràng |
-| R18 | **CI chạy lâu** (timeout 360 phút) | Thấp | Cache `out/` + `Qt` (đã có `cache: true`); job `smoke` dùng lại artifact của `build` |
+| R11 | GPL/trademark/pháp lý | **Trung bình–Cao** | Chỉ nghiên cứu, không phân phối; giữ notice GPL; review AMD/NVIDIA/Lenovo/AMI trademark; không dùng cho gian lận |
+| R12 | CI build nhầm repo | **Cao** | ✅ **đã sửa** — `build.yml:42` dùng `${{ github.repository }}`; kiểm tra `source-revision.txt` |
+| R13 | CI không build được Guest Additions (thiếu WDK) | Trung bình | `VBOX_WITHOUT_ADDITIONS=1` → job `full-additions`; WDK 19041 MSI/CAB direct; fallback self-hosted |
+| R14 | MPE tạo giá trị không ổn định | **Cao** | `CloakSeed` + UUID salt; materialize 1 lần; test mở lại 3 lần ở T3 |
+| R15 | MPE tạo mâu thuẫn chéo | Cao | C1–C13 + `validateEffectiveConfig`; reject `DRAFT`/`RESEARCH_ONLY`; manifest check |
+| R16 | `.asm` BIOS bị regenerate trong CI → mất patch | Trung bình | §7.3 — không cài OpenWatcom, không regenerate |
+| R17 | PR lớn, khó review | Trung bình | 6 PR theo §10.1; mỗi PR có gate riêng |
+| R18 | CI chạy lâu (timeout 360 phút) | Thấp | Cache Qt; `smoke` dùng lại artifact; T3 tách runner |
+| R19 | Đổi binding ID làm GA/GPU/storage/virtio không bind | **Cao** | §4.5.8: binding cứng build-level; test Windows PnP + Linux `lspci -k`; không random |
+| R20 | `CloakEnabled=off` không khôi phục asset build-time | **Cao** | Build mode `stock` riêng; không hứa off = stock |
+| R21 | Profile lấy từ máy không tồn tại/ghép field | **Cao** | O4 blocker; provenance + linter; registry rỗng đến khi verify |
+| R22 | Clone/migration/saved-state làm trộn identity | Trung bình | Seed hash + profile ID + manifest hash; restore mismatch fail; test §4.6.5 |
+| R23 | T3 artifact chứa serial/UUID/seed-adjacent data | **Cao** | Runner riêng; redact report; không upload raw dump/.vbox/seed; retention ngắn |
+| R24 | Seed lộ qua ExtraData/.vbox hoặc shell history | Trung bình | Không log seed; provision qua CLI/API có kiểm soát; ExtraData không phải secret store; nêu rõ host-admin ngoài threat model |
+| R25 | Provision/consume thất bại giữa chừng | Trung bình | Provision VM off, verify đọc lại, idempotent; startup chỉ đọc; thiếu seed fail rõ |
 
 ---
 
 ## 10. Quyết định đã chốt
 
-> Đã chốt với người yêu cầu. Kế hoạch dưới đây được cập nhật theo 4 quyết định này.
+> Đã chốt với người yêu cầu. Kế hoạch dưới đây được cập nhật theo 5 quyết định này.
 > **Chỉ lập kế hoạch — chưa triển khai code cho tới khi có chỉ thị "triển khai".**
 
 | # | Câu hỏi | Quyết định | Ảnh hưởng lên kế hoạch |
 |---|---|---|---|
-| 1 | Chia PR thế nào? | **Theo đề xuất**: 4 PR | Mục 10.1 |
-| 2 | Giá trị đích cho DMI vendor/product? | **Thông tin phải đồng bộ** | §4.5 — thay bằng Machine Profile Engine; thêm Phase 1.0 |
-| 3 | Selector random hay cố định? | **Random, nhưng ổn định qua các lần mở VM** | §4.6 — PRNG seed từ VM UUID, materialize 1 lần |
-| 4 | Môi trường build? | **GitHub Actions** | §4.7 — 3 job (`core` / `full` / `smoke`); thêm task 0.3, 0.4, 0.7 |
+| 1 | Chia PR thế nào? | **6 PR theo vertical slice** | Mục 10.1 |
+| 2 | Giá trị đích cho DMI vendor/product? | **Thông tin phải đồng bộ** | §4.5 — Machine Profile Engine; thêm Phase 1.0 |
+| 3 | Selector random hay cố định? | **Random, nhưng ổn định qua các lần mở VM** | §4.6 — `CloakSeed` + UUID salt, materialize 1 lần |
+| 4 | Môi trường build? | **GitHub Actions + T3 self-hosted** | §4.7 — T1/T2 hosted, T3 runtime self-hosted |
+| 5 | `CloakEnabled=off` có trả về stock? | **Không** — chỉ tắt lớp runtime; asset build-time cần build `stock` riêng | §4.5.9 |
 
 ### 10.1 Chia PR (quyết định #1)
 
-| PR | Branch | Nội dung | Phase | Job CI bắt buộc |
+| PR | Branch | Nội dung | Phase | Gate bắt buộc |
 |---|---|---|---|---|
-| **PR-1** | `feature/cloak-identity` | MPE + Tier 1 (CPU/firmware) + Tier 2 (device identity) | 1.0, 1, 2 | `core` |
-| **PR-2** | `feature/cloak-ga-rename` | Đổi tên Guest Additions (driver/service/file/INF/PE version info) | 3 | `full` |
-| **PR-3** | `feature/cloak-provisioning` | UI runtime actions + Guest Control provisioning | 4 | `full` |
-| **PR-4** | `feature/cloak-coherence` | Sửa cross-layer mismatch + nâng libtpms | 5 | `core` (+ `full` nếu đụng GA) |
+| **PR-1** | `feature/cloak-foundation` | MPE/control plane, seed provision/consume, manifest skeleton, state guard, namespace, binding classifier, CI T1/T2 | 1.0 | T1/T2; T3 differential **bằng 0** khi T3 sẵn sàng (bắt buộc trước PR-2); không đổi identity guest-visible |
+| **PR-2** | `feature/cloak-cpu-firmware` | CPUID/HVP + DMI/ACPI/BIOS/VGA/EFI assets | 1, 5 (slice) | T1/T2 + T3 3 boot; C1–C13 đúng severity |
+| **PR-3** | `feature/cloak-devices` | PCI/storage/USB/network device identity | 2, 5 (slice) | T1/T2 + T3 Windows/Linux; binding test |
+| **PR-4** | `feature/cloak-ga-rename` | Guest Additions rename (driver/service/file/INF/PE) | 3 | `full-additions` + chữ ký + install/upgrade/uninstall/rollback |
+| **PR-5** | `feature/cloak-provisioning` | UI runtime actions + Guest Control provisioning | 4 | `build` + guest integration/permissions/rollback |
+| **PR-6** | `feature/cloak-coherence-tpm` | Residual coherence + TPM (2.19 + libtpms); **không phải coherence lần đầu** | 5 | T3 3 boot + TPM test |
 
 Quy tắc merge:
-- PR-1 phải merge trước (MPE là nền của PR-4).
-- PR-4 cần PR-1 + PR-2 đã merge (để so coherence trên bộ GA đã đổi tên).
-- PR-2 và PR-3 độc lập với nhau.
+- PR-1 merge trước; là nền cho mọi PR sau.
+- PR-2 và PR-3 mỗi PR phải pass coherence gate của slice mình, không đợi PR-6.
+- PR-4 độc lập với PR-2/PR-3 về code, nhưng binding ID phải khớp; không đổi VMMDev trong baseline. Gate PR-4 phải chứng minh cài mới, upgrade từ GA stock, uninstall và rollback; chữ ký không thay thế test lifecycle.
+- PR-5 phải có test guest integration, quyền thực thi và rollback khi provisioning lỗi; chỉ build xanh là chưa đủ.
+- PR-6 chỉ chứa residual/TPM; không dùng để “dọn” mismatch đã tạo ở PR-2/PR-3.
 
 ### 10.2 Đồng bộ thông tin (quyết định #2)
 
@@ -1651,45 +1958,67 @@ Quy tắc merge:
 
 Tóm tắt thay đổi so với bản kế hoạch đầu:
 - Thêm **Phase 1.0 — Machine Profile Engine** chạy trước Phase 1/2.
-- MPE nằm ở **VBoxC** (`src/VBox/Main/src-client/ConsoleImplConfigCloak.cpp/.h`), là nguồn sự thật duy nhất.
-- Mọi giá trị identity được **materialize một lần** và ghi vào node CFGM `Devices/cloak/0/Config/*`; device đọc từ đó (fallback về `Devices/<dev>/0/Config/*` để user vẫn override được).
-- Bộ luật coherence **C1–C10** kiểm tra lúc khởi tạo + lint offline.
-- 3 profile mẫu: `profile-lenovo-t14` (Intel, NVIDIA), `profile-dell-latitude` (Intel, Intel GPU), `profile-amd-ryzen-t14` (AMD).
-- Mặc định **tắt** — bật qua `Devices/cloak/0/Config/Enabled`.
+- MPE nằm ở **VBoxC** (`src/VBox/Main/src-client/ConsoleImplConfigCloak.cpp/.h`), là nguồn mặc định cho **runtime**; effective CFGM sau override là nguồn sự thật cuối.
+- Mọi giá trị identity được **materialize một lần** vào node thật `Devices/<dev>/0/Config/*`; device đọc như stock. Control plane là root `/Cloak/...`; **không** dùng `Devices/cloak`.
+- MPE chạy **sau** `i_configCfgmOverlay` tại `ConsoleImplConfigX86.cpp:2055`; chỉ điền key chưa có → user override thắng; `validateEffectiveConfig()` chạy sau materialize.
+- Seed chỉ **provision** khi VM off; startup **consume**; thiếu seed → fail, không fallback.
+- Bộ luật coherence **C1–C13** có severity STRICT/HEURISTIC, kiểm tra lúc khởi tạo + lint offline + test từng rule.
+- **`BUILDIDENTITYMANIFEST`** ràng buộc profile với firmware/chipset/binding của build.
+- Registry production **rỗng** cho tới O4; 3 candidate `DRAFT` trong §4.5.4; test dùng `test-profile-synthetic`.
+- Binding identity (VMMDev/VGA/VirtIO) là **build-level**, không random; xem §4.5.8.
+- Mặc định **tắt** — bật qua `VBoxInternal/Cloak/Enabled`; off chỉ tắt runtime, không khôi phục asset build-time.
 
 ### 10.3 Selector ổn định (quyết định #3)
 
 → Xem [§4.6](#46-selector-ổn-định-quyết-định-3-random-nhưng-không-đổi-khi-mở-lại-vm).
 
 Tóm tắt:
-- Seed gốc = **VM UUID** (lưu trong `.vbox`, ổn định qua mọi lần mở).
-- PRNG = `splitmix64`, tách 4 stream độc lập (profile / serial / mac-did / jitter).
-- **Materialize đúng một lần** trong MPE → ghi CFGM. Không tính lại ở device.
-- Ngoại lệ: virtio-net DID dùng `FNV1a64(seed64 || MAC)` — MAC ổn định nên vẫn deterministic.
-- Cơ chế ép profile cụ thể để test: `Devices/cloak/0/Config/Profile`.
-- 4 test bắt buộc: mở lại 3 lần → giống hệt; clone VM → khác (UUID khác); 2 VM → khác nhau; re-seed UUID → đổi hết.
+- Seed gốc = **`CloakSeed`** 32 byte, **chỉ sinh lúc provision**, lưu `VBoxInternal/Cloak/Seed` (host-side); startup chỉ đọc.
+- VM UUID là **salt**, không phải secret; `seed64 = first8(HMAC-SHA-256(CloakSeed, domain || UUID))`.
+- PRNG = `splitmix64`, tách 3 stream độc lập (profile / serial / jitter). Không còn stream virtio.
+- **Materialize đúng một lần** trong MPE → ghi CFGM; `validateEffectiveConfig()` kiểm tra CFGM thực tế sau user override. Không tính lại ở device.
+- Cơ chế ép profile cụ thể để test: `VBoxInternal/Cloak/Profile`; `DRAFT`/`RESEARCH_ONLY` bị từ chối ở production; manifest family/chipset phải khớp.
+- Test bắt buộc: mở lại 3 lần → giống hệt; `clonevm` new UUID → khác; 2 VM → khác nhau; re-seed → chỉ field seed-derived đổi; export/import giữ UUID → giữ nguyên.
+- Không dùng test copy `.vbox` + disk thủ công; không dùng `showvminfo` để verify CFGM.
 
 ### 10.4 CI GitHub Actions (quyết định #4)
 
 → Xem [§4.7](#47-ci-bằng-github-actions-quyết-định-4).
 
 Tóm tắt:
-- **CI đã tồn tại**: `.github/workflows/build.yml` (310 dòng, **chưa commit**) build VirtualBox 7.2 Windows x64 trên `windows-2022` — Qt 6.8.0, SDL 1.2.15, yasm 1.3.0, kBuild prebuilt, patch bỏ DDK check.
-- **Fix bắt buộc (CI-10)**: workflow checkout `repository: VirtualBox/virtualbox` → đang build **upstream**, không build code của bạn. Đổi thành `${{ github.repository }}` / `${{ github.ref_name }}`.
-- Thêm trigger cho `feature/cloak-*` và `pull_request`.
-- Thêm job `smoke` (verify identity) + job `full-additions` (cần WDK, vì `VBOX_WITHOUT_ADDITIONS=1` chặn PR-2).
+- **CI hiện tại**: `.github/workflows/build.yml` đã commit, 1000 dòng, 3 job `build`/`full-additions`/`smoke`, checkout `${{ github.repository }}` tại `:42`.
+- **Đã sửa (CI-10)**: không còn build upstream; trigger có `feature/cloak*` + `pull_request`.
+- **T1/T2 hosted**: build + scan binary + config plane. **Không** chạy VM.
+- **T3 self-hosted job `t3-runtime`**: host `collect-identity.ps1 -RequireRuntime` + guest collector Windows/Linux, **3 boot**, schema comparator; bắt buộc cho PR-2/PR-3/PR-6.
+- **PR-4** dùng `full-additions` + WDK; kiểm tra chữ ký, install/upgrade/uninstall/rollback.
+- **PR-5** dùng `build` + guest integration/permissions/rollback; không chỉ build xanh.
 - Output: `out\win.amd64\release\bin`.
-- Không cần OpenWatcom → giữ `.asm` BIOS checked-in là nguồn build (không regenerate).
+- Không cần OpenWatcom → giữ `.asm` BIOS checked-in (không regenerate).
 - Đã loại trừ: 32-bit OpenSSL/curl, kBuild, SDL, Qt, SDK — workflow hiện tại đã xử lý thành công.
 
-### 10.5 Vẫn còn mở (không chặn triển khai)
+### 10.5 Blocker và việc còn mở
 
-| # | Mục | Xử lý |
-|---|---|---|
-| O1 | CPU profile nào port trước | Đề xuất: `i7-9750H` (Intel, có CPUID blob chuẩn) + `Ryzen 7 PRO 6850U` (AMD) — fork dùng `Ryzen 7 1800X` làm negative control (byte-for-byte giống Oracle) |
-| O2 | Nội dung `EfiGuardDxe` | **Ngoài scope** — cần binary DXE mới, activation semantics chưa rõ |
-| O3 | Nâng libtpms 0.10.2 | Tách PR riêng trong PR-4; diff lớn, cần test TPM |
-| O4 | Profile đầy đủ cho 3 máy mẫu | Cần tra cứu spec thật của từng máy (SMBIOS, ACPI, PCI ID, EEPROM) trước khi viết profile |
+| # | Mục | Trạng thái | Xử lý |
+|---|---|---|---|
+| O1 | CPU profile nào port trước | **Blocked bởi O4** | Chỉ chọn sau khi có dữ liệu CPUID thật; không dùng i7-9750H làm “Cascade Lake” |
+| O2 | Nội dung `EfiGuardDxe` | **Ngoài scope** | Cần binary DXE mới, activation semantics chưa rõ; detection/legal cao |
+| O3 | Nâng libtpms 0.10.2 | **PR-6** | Diff lớn, cần test TPM; không gộp PR-3 |
+| O4 | Profile đầy đủ + dữ liệu máy thật | **BLOCKER** | Phải có SMBIOS/ACPI/PCI/EEPROM/EDID/storage dump + model/BIOS/ngày; registry production rỗng đến khi xong |
+| O5 | Chipset model không khớp laptop hiện đại | **BLOCKER** | VirtualBox chỉ có i440FX/PIIX3/ICH9; không thể giả HM370/Tiger Lake bằng ID. Chọn profile desktop/workstation hợp lệ hoặc ghi nhận residual |
+| O6 | Chọn `CloakHvPresentation` | **BLOCKER** | `Hidden` hoặc `HyperV`; không trộn; chốt trước PR-2 |
+| O7 | Binding identity strategy | **BLOCKER** | Mặc định giữ VMMDev/VGA/virtio; chỉ đổi với GA/driver + ký. Chốt trước PR-3 |
+| O8 | T3 self-hosted runner + guest images | **BLOCKER** | Cần runner riêng có VT-x/VBoxDrv + Windows/Linux guest; chưa có trong repo |
+| O9 | BuildIdentityManifest source/versioning | **Mở** | Chốt nguồn asset hash + version từ build system; không hard-code trong profile |
+
+### 10.6 Điều kiện mở khóa triển khai
+
+Chỉ bắt đầu code identity khi:
+1. O4 có ít nhất một profile thật được verify, phân loại `COMPATIBLE` và pass linter C1–C13.
+2. O5 có quyết định: profile desktop/workstation hợp lệ, hoặc chấp nhận residual và ghi rõ.
+3. O6 chốt `Hidden`/`HyperV`.
+4. O7 chốt binding policy; VMMDev/VGA mặc định giữ stock.
+5. T3 self-hosted sẵn sàng; nếu chưa, PR-2/PR-3 không được merge.
+6. O9 có manifest schema + nguồn hash asset; profile không được selectable nếu manifest chưa khớp.
 
 ---
 
@@ -1699,10 +2028,13 @@ Tóm tắt:
 [x] Đọc tài liệu cloak/           → mục 1
 [x] Đối chiếu với src/            → mục 3
 [x] Lập kế hoạch                   → tài liệu này
-[x] Chốt 4 quyết định thiết kế    → mục 10
+[x] Chốt 5 quyết định thiết kế    → mục 10
+[x] Revise theo 8 blocker         → MPE/binding/build/CI/profile
+[x] Revise critique consistency   → seed/effective/manifest/T3/state/lifecycle
 [x] Phase 0.3 — sửa workflow CI    → .github/workflows/build.yml
-[x] Phase 0.4 — job smoke + script → .github/scripts/collect-identity.ps1
-[x] Phase 0.4b — job full-additions → .github/scripts/install-wdk.ps1
+[x] Phase 0.4 — T1/T2 + script     → .github/scripts/
+[x] Phase 0.4b — full-additions    → .github/scripts/install-wdk.ps1
+[ ] Phase 0.4c — T3 self-hosted    ← chưa làm
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -1711,25 +2043,27 @@ Tóm tắt:
 | Hạng mục | Trạng thái |
 |---|---|
 | Mã nguồn VirtualBox (`src/`) | **Chưa sửa gì** |
-| `.github/workflows/build.yml` | 3 job: `build` (core), `full-additions` (GA + WDK), `smoke` (verify identity) |
-| `.github/scripts/collect-identity.ps1` | Thu thập + kiểm tra ổn định identity (3 kịch bản) |
+| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; checkout `${{ github.repository }}` `:42` |
+| `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 cần refactor theo §4.7.4.1 |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
-| `.gitignore` | Vẫn còn thay đổi chưa commit (`+cloak`) |
-| Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` |
+| `.gitignore` | Sạch, không còn thay đổi `+cloak` |
+| Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` — đã revise, **chưa commit** |
 
 Khi nhận chỉ thị "triển khai", thứ tự đề xuất:
 
 1. Phase 0.1-0.2 (branch + build local) — *chưa làm*
-2. Phase 0.5 (rewrite path pcbios ↔ efi)
-3. Phase 1.0 (MPE) — nền cho mọi thứ sau
-4. Phase 1 (Tier 1) → Phase 2 (Tier 2) → PR-1
-5. Phase 3 → PR-2
-6. Phase 4 → PR-3
-7. Phase 5 → PR-4
+2. Phase 0.4c (T3 self-hosted) + Phase 0.5 (xác minh path pcbios ↔ efi; implementation ở PR-2)
+3. Phase 1.0 (MPE/control plane) → **PR-1**
+4. Phase 1 (CPU/firmware) → **PR-2**, coherence slice
+5. Phase 2 (device identity) → **PR-3**, coherence slice + binding test
+6. Phase 3 (GA rename) → **PR-4**
+7. Phase 4 (provisioning) → **PR-5**
+8. Phase 5 residual + TPM → **PR-6**
 
-**Bước kiểm chứng đầu tiên sau khi có code:** push branch `feature/cloak` → workflow chạy →
-- job `build` xanh → job `smoke` xanh → artifact `cloak-identity-report` cho thấy identity **đã đổi** so với baseline nhưng **ổn định giữa 2 lần chạy**.
-- job `full-additions` xanh → artifact `virtualbox-guest-additions` có `VBoxGuest.sys` + `VBoxGuestAdditions.iso`.
+**Bước kiểm chứng đầu tiên sau khi có code:** push `feature/cloak-foundation` → workflow chạy →
+- T1/T2 xanh; control plane/seed/manifest không làm đổi identity guest-visible.
+- Khi T3 sẵn sàng: identity **ổn định qua 3 boot**; **differential stock-vs-cloak bằng 0** ở PR-1. Khác baseline chỉ bắt đầu từ PR-2 khi bật identity thật. T3 phải sẵn sàng trước PR-2.
+- `full-additions` xanh → artifact `virtualbox-guest-additions` có `VBoxGuest.sys` + `VBoxGuestAdditions.iso` (chỉ cần từ PR-4; gate PR-4 còn phải test install/upgrade/uninstall/rollback).
 
 ---
 
@@ -1750,13 +2084,17 @@ Khi nhận chỉ thị "triển khai", thứ tự đề xuất:
 | Storage | `src/VBox/Devices/Storage/DevATA.cpp`, `DevAHCI.cpp`, `DrvHostDVD.cpp`, `VSCSI/` |
 | USB | `src/VBox/Devices/Input/UsbKbd.cpp`, `UsbMouse.cpp`; `src/VBox/Devices/USB/DevOHCI.cpp`, `DevXHCI.cpp`; `src/VBox/Devices/Video/UsbWebcamDesc.cpp`; `src/VBox/Devices/Storage/UsbMsd.cpp` |
 | Chipset | `src/VBox/Devices/Bus/DevPCI.cpp` |
-| VMMDev | `src/VBox/Devices/VMMDev/VMMDev.cpp` |
-| Network | `src/VBox/Devices/Network/DevE1000.cpp`, `DevVirtioNet.cpp`; `src/VBox/Devices/VirtIO/VirtioCore.cpp` |
+| VMMDev | `src/VBox/Devices/VMMDev/VMMDev.cpp` — binding mặc định `80EE:CAFE` |
+| Network | `src/VBox/Devices/Network/DevE1000.cpp`; `DevVirtioNet.cpp`/`VirtIO/VirtioCore.cpp` (experimental) |
 | TPM | `src/libs/libtpms-0.10.2/src/tpm2/VendorInfo.c` |
-| Guest Additions | `src/VBox/Additions/` |
+| Guest Additions | `src/VBox/Additions/` — binding contract với VMMDev/VGA |
 | Control plane | `src/VBox/Main/src-client/ConsoleImplConfigCommon.cpp`, `ConsoleImplConfigX86.cpp` |
+| Cloak MPE | `src/VBox/Main/src-client/ConsoleImplConfigCloak.cpp/.h` (mới) |
+| Binding policy | §4.5.8 — VMMDev/VGA/virtio build-level |
 
 ## Phụ lục B — Baseline đối chiếu
+
+> Các hash dưới đây lấy từ tài liệu fork, **chưa phải baseline build hiện tại**. Phải build stock từ HEAD `VBox-7.2` và ghi hash thật trước khi dùng làm gate T1.
 
 | Artifact | SHA-256 (fork, theo tài liệu) |
 |---|---|

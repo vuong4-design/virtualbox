@@ -1200,6 +1200,7 @@ if !defined(VBOX_ONLY_SDK) && !defined(VBOX_ONLY_EXTPACKS) # Note this goes on f
  	$(if $(VBOX_WITH_PCI_PASSTHROUGH),src-client/PCIRawDevImpl.cpp,) \
  	src-client/ClientTokenHolder.cpp \
  	src-client/ConsoleImpl.cpp \
+	src-client/ConsoleImplConfigCloak.cpp \
  	src-client/ConsoleImplConfigCommon.cpp \
  	src-client/ConsoleImplConfigX86.cpp \
  	$(if $(VBOX_WITH_VIRT_ARMV8),src-client/ConsoleImplConfigArmV8.cpp,) \
