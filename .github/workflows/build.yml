@@ -953,6 +953,37 @@ jobs:
           & ".\scripts\compare-identity.ps1" -SelfTest;
           if ($LASTEXITCODE -ne 0) { throw "compare-identity.ps1 self-test failed: $LASTEXITCODE" }
 
+      - name: Verify Linux guest collector self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/collect-guest-identity.sh
+          dir="$(cygpath -u "$RUNNER_TEMP")/guest-identity"
+          mkdir -p "$dir"
+          bash scripts/collect-guest-identity.sh --self-test --output "$dir/guest-linux.json"
+          python -m json.tool "$dir/guest-linux.json" > /dev/null
+          bash scripts/collect-guest-identity.sh --self-test --output "$dir/guest-linux-2.json"
+          cmp "$dir/guest-linux.json" "$dir/guest-linux-2.json"
+
+      - name: Verify Windows guest collector self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          $dir = Join-Path $env:RUNNER_TEMP "guest-identity";
+          $windowsJson = Join-Path $dir "guest-windows.json";
+          & ".\scripts\collect-guest-identity.ps1" -SelfTest -OutputPath $windowsJson;
+          if ($LASTEXITCODE -ne 0) { throw "collect-guest-identity.ps1 self-test failed: $LASTEXITCODE" }
+          $windowsDoc = Get-Content -LiteralPath $windowsJson -Raw | ConvertFrom-Json;
+          if ($windowsDoc.source -ne "guest-windows") { throw "unexpected guest source '$($windowsDoc.source)'" }
+          & ".\scripts\compare-identity.ps1" -Reference $windowsJson -Candidate $windowsJson;
+          if ($LASTEXITCODE -ne 0) { throw "compare-identity.ps1 rejected the Windows guest document: $LASTEXITCODE" }
+          $linuxJson = Join-Path $dir "guest-linux.json";
+          $linuxDoc = Get-Content -LiteralPath $linuxJson -Raw | ConvertFrom-Json;
+          if ($linuxDoc.source -ne "guest-linux") { throw "unexpected guest source '$($linuxDoc.source)'" }
+          & ".\scripts\compare-identity.ps1" -Reference $linuxJson -Candidate $linuxJson;
+          if ($LASTEXITCODE -ne 0) { throw "compare-identity.ps1 rejected the Linux guest document: $LASTEXITCODE" }
+
       - name: Verify generated build identity manifest
         shell: pwsh
         run: |

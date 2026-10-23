@@ -66,7 +66,7 @@ $script:CloakVolatileFields = @(
     'loadaddress'
 )
 
-$script:CloakArrayKeyFields = @('bdf', 'leaf', 'index', 'slot', 'name', 'id', 'key', 'table', 'device')
+$script:CloakArrayKeyFields = @('bdf', 'leaf', 'index', 'slot', 'name', 'id', 'key', 'table', 'device', 'mac', 'connector')
 
 $script:CloakSelfTestFailed = $false
 

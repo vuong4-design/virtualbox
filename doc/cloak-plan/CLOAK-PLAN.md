@@ -979,7 +979,7 @@ Quy tắc:
 - T3 phải có ít nhất **1 guest Windows + 1 guest Linux**, vì binding VMMDev/VGA/virtio có thể khác nhau theo GA/driver.
 - `showvminfo` không đọc CFGM nội bộ; T3 dùng `debugvm <vm> info pci verbose` + collector trong guest. Nếu cần kiểm tra materialize, thêm debug-info `cfgm` test-only.
 - T3 chỉ có ý nghĩa khi guest thực sự boot tới userspace và collector chạy xong; “no bootable device” không phải T3.
-- **Hiện trạng:** chưa có job `t3-runtime`, chưa có guest collector, script host chỉ chạy 2 lần; các task `0.4.3a–c` phải xong trước khi gate T3 có hiệu lực.
+- **Hiện trạng:** chưa có job `t3-runtime`; guest collector Windows/Linux đã có script + self-test trong `smoke` nhưng chưa capture thật; script host chỉ chạy 2 lần; các task `0.4.3a–c` phải xong trước khi gate T3 có hiệu lực.
 
 Yêu cầu VM cho T3:
 - Guest Windows (PE/WinPE hoặc image test) và Linux live có disk ảo; T3 dùng VM có disk, **không** dùng chế độ no-disk của script host; `debugvm` chạy trên chính VM đó.
@@ -1126,7 +1126,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.4.1a | Verify `build-identity.json` + manifest nhúng | build + `.github/scripts/verify-manifest.ps1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | ✅ **đã làm** | Verify schema/hash/family/chipset/binding; build sinh `build-identity.json`; header nhúng qua `VBOX_WITH_CLOAK_BUILD`; mismatch fail |
 | 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** | Xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
 | 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | ⬜ **chưa làm** | `t3-runtime` job; `VBoxDrv` + VT-x; fail nếu thiếu |
-| 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | ⬜ **chưa làm** | Boot tới userspace; DMI/ACPI/PCI/EDID/storage/NIC |
+| 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | 🟡 **một phần** | Script Windows/Linux viết xong theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 (0.4.3) |
 | 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
 | 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | ⬜ **chưa làm** | 3 boot giống hệt; state restore không trộn identity |
 | 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
@@ -2036,7 +2036,7 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4b — full-additions    → .github/scripts/install-wdk.ps1
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
 [x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
-[~] Phase 0.4.3a/b — guest collector + schema comparator → compare-identity.ps1 (self-test xanh; chưa ghép job T3)
+[~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke; chưa ghép job T3)
 [ ] Phase 0.4c — T3 self-hosted    ← chưa làm
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
@@ -2046,9 +2046,10 @@ Chỉ bắt đầu code identity khi:
 | Hạng mục | Trạng thái |
 |---|---|
 | Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi |
-| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; build sinh `build-identity.json`; smoke verify manifest + header generator + comparator self-test |
+| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; build sinh `build-identity.json`; smoke verify manifest + header generator + comparator self-test + guest collector self-test |
 | `.github/scripts/verify-manifest.ps1`, `CloakManifest.psm1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | Verify/sinh manifest stock+cloak và header nhúng; fixture `testdata/build-identity.cloak.json` |
-| `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; chưa ghép job T3 |
+| `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
+| `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 cần refactor theo §4.7.4.1 |
 | `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
