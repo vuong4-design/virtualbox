@@ -301,6 +301,32 @@ jobs:
             throw "kmk build failed with exit code $LASTEXITCODE.";
           }
 
+      - name: Build and run cloak config testcase
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = "Stop";
+
+          # LocalConfig.kmk tat testcases; bat lai bang override dong lenh va chi
+          # build target tstCloakConfig (unit test header-only, khong can VM).
+          $kmk = "$env:KBUILD_PATH\bin\win.amd64\kmk.exe";
+          $jobs = [Environment]::ProcessorCount;
+
+          & $kmk "-j$jobs" "VBOX_WITH_TESTCASES=1" "tstCloakConfig";
+          if ($LASTEXITCODE -ne 0) {
+            throw "kmk tstCloakConfig build failed with exit code $LASTEXITCODE.";
+          }
+
+          $tst = "out\win.amd64\release\bin\testcase\tstCloakConfig.exe";
+          if (-not (Test-Path $tst)) {
+            throw "tstCloakConfig.exe not found: $tst";
+          }
+
+          & $tst;
+          if ($LASTEXITCODE -ne 0) {
+            throw "tstCloakConfig failed with exit code $LASTEXITCODE.";
+          }
+
       # 2. Kiểm tra file thực thi và đóng gói kèm toàn bộ DLL cần thiết
       - name: Verify and Bundle Dependencies
         shell: pwsh

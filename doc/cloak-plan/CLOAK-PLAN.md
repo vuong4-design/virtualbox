@@ -2036,7 +2036,7 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4 — T1/T2 + script     → .github/scripts/
 [x] Phase 0.4b — full-additions    → .github/scripts/install-wdk.ps1
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
-[x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
+[x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp (build + chạy trong CI job `build`)
 [~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke)
 [~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5; audit redaction 0.4.5; `-CheckRuntime` bring-up runner); chờ runner O8
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
@@ -2046,8 +2046,8 @@ Chỉ bắt đầu code identity khi:
 
 | Hạng mục | Trạng thái |
 |---|---|
-| Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi |
-| `.github/workflows/build.yml` | Đã commit; job `build`, `full-additions`, `smoke`, `t3-runtime` (gated); build sinh `build-identity.json`; smoke verify manifest + header generator + comparator + guest collector + T3 orchestrator self-test |
+| Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi; CI build + chạy `tstCloakConfig` trong job `build` (override `VBOX_WITH_TESTCASES=1`, chỉ target testcase) |
+| `.github/workflows/build.yml` | Đã commit; job `build`, `full-additions`, `smoke`, `t3-runtime` (gated); build sinh `build-identity.json`; build + chạy `tstCloakConfig` (testcase trong job `build`); smoke verify manifest + header generator + comparator + guest collector + T3 orchestrator self-test |
 | `.github/scripts/verify-manifest.ps1`, `CloakManifest.psm1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | Verify/sinh manifest stock+cloak và header nhúng; fixture `testdata/build-identity.cloak.json` |
 | `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
