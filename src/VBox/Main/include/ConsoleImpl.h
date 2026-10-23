@@ -984,6 +984,10 @@ private:
     HRESULT i_loadDataFromSavedState();
     int i_loadStateFileExecInternal(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, uint32_t u32Version);
 
+    int i_cloakSetCurrentStateIdentity(bool fEnabled, const char *pszProfileId, const char *pszSeedHash);
+    int i_cloakSaveStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM);
+    int i_cloakLoadStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM);
+
     static DECLCALLBACK(int)    i_saveStateFileExec(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, void *pvUser);
     static DECLCALLBACK(int)    i_loadStateFileExec(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, void *pvUser,
                                                     uint32_t uVersion, uint32_t uPass);
@@ -1049,6 +1053,16 @@ private:
 #endif
 
     bool mSavedStateDataLoaded : 1;
+    bool mfCloakSavedStateIdentityValid : 1;
+    bool mfCloakSavedStateEnabled : 1;
+    bool mfCloakCurrentStateIdentityValid : 1;
+    bool mfCloakCurrentStateEnabled : 1;
+    Utf8Str mStrCloakSavedStateProfileId;
+    Utf8Str mStrCloakSavedStateSeedHash;
+    Utf8Str mStrCloakSavedStateManifestHash;
+    Utf8Str mStrCloakCurrentStateProfileId;
+    Utf8Str mStrCloakCurrentStateSeedHash;
+    Utf8Str mStrCloakCurrentStateManifestHash;
 
     const ComPtr<IMachine> mMachine;
     const ComPtr<IInternalMachineControl> mControl;

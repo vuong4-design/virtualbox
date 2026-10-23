@@ -46,6 +46,16 @@
 #define CLOAK_SEED_HEX_SIZE             (CLOAK_SEED_SIZE * 2U)
 #define CLOAK_PROFILE_ID_MAX            64U
 
+typedef struct CLOAKSTATEIDENTITY
+{
+    bool        fEnabled;
+    char        szProfileId[CLOAK_PROFILE_ID_MAX];
+    char        szSeedHash[CLOAK_SEED_HEX_SIZE + 1];
+    char        szManifestHash[CLOAK_SEED_HEX_SIZE + 1];
+} CLOAKSTATEIDENTITY;
+typedef CLOAKSTATEIDENTITY *PCLOAKSTATEIDENTITY;
+typedef const CLOAKSTATEIDENTITY *PCCLOAKSTATEIDENTITY;
+
 AssertCompile(CLOAK_SEED_SIZE == RTSHA256_HASH_SIZE);
 AssertCompile(CLOAK_SEED_HEX_SIZE == RTSHA256_DIGEST_LEN);
 
@@ -468,6 +478,111 @@ DECLINLINE(int) CloakSeedHashHex(const uint8_t *pabSeed, size_t cbSeed, char *ps
     RTSha256(pabSeed, cbSeed, abHash);
     int vrc = RTStrPrintHexBytes(pszHash, cchHash, abHash, sizeof(abHash), RTSTRPRINTHEXBYTES_F_UPPER);
     RTMemWipeThoroughly(abHash, sizeof(abHash), 3);
+    return vrc;
+}
+
+DECLINLINE(void) CloakStateIdentityInit(PCLOAKSTATEIDENTITY pIdentity)
+{
+    if (pIdentity)
+        RT_ZERO(*pIdentity);
+}
+
+DECLINLINE(int) CloakStateIdentitySet(PCLOAKSTATEIDENTITY pIdentity, bool fEnabled,
+                                      const char *pszProfileId, const char *pszSeedHash,
+                                      const char *pszManifestHash)
+{
+    if (!pIdentity)
+        return VERR_INVALID_PARAMETER;
+
+    CloakStateIdentityInit(pIdentity);
+    pIdentity->fEnabled = fEnabled;
+    if (!fEnabled)
+        return VINF_SUCCESS;
+
+    if (   !pszProfileId || !*pszProfileId || strlen(pszProfileId) >= CLOAK_PROFILE_ID_MAX
+        || !pszSeedHash || strlen(pszSeedHash) != CLOAK_SEED_HEX_SIZE
+        || !pszManifestHash || strlen(pszManifestHash) != CLOAK_SEED_HEX_SIZE)
+        return VERR_INVALID_PARAMETER;
+
+    int vrc = RTStrCopy(pIdentity->szProfileId, sizeof(pIdentity->szProfileId), pszProfileId);
+    if (RT_SUCCESS(vrc))
+        vrc = RTStrCopy(pIdentity->szSeedHash, sizeof(pIdentity->szSeedHash), pszSeedHash);
+    if (RT_SUCCESS(vrc))
+        vrc = RTStrCopy(pIdentity->szManifestHash, sizeof(pIdentity->szManifestHash), pszManifestHash);
+    return vrc;
+}
+
+DECLINLINE(bool) CloakStateIdentityEquals(PCCLOAKSTATEIDENTITY pLeft, PCCLOAKSTATEIDENTITY pRight)
+{
+    if (!pLeft || !pRight)
+        return false;
+    if (pLeft->fEnabled != pRight->fEnabled)
+        return false;
+    if (!pLeft->fEnabled)
+        return true;
+    return    !RTStrCmp(pLeft->szProfileId, pRight->szProfileId)
+           && !RTStrCmp(pLeft->szSeedHash, pRight->szSeedHash)
+           && !RTStrCmp(pLeft->szManifestHash, pRight->szManifestHash);
+}
+
+DECLINLINE(int) CloakCompareStateIdentity(PCCLOAKSTATEIDENTITY pSaved, PCCLOAKSTATEIDENTITY pCurrent)
+{
+    if (!pSaved || !pCurrent)
+        return VERR_INVALID_PARAMETER;
+    return CloakStateIdentityEquals(pSaved, pCurrent) ? VINF_SUCCESS : VERR_MISMATCH;
+}
+
+DECLINLINE(void) CloakManifestHashString(RTSHA256CONTEXT *pCtx, const char *pszValue)
+{
+    uint32_t cbValue = pszValue ? (uint32_t)strlen(pszValue) : UINT32_MAX;
+    uint32_t u32Value = RT_H2LE_U32(cbValue);
+    RTSha256Update(pCtx, &u32Value, sizeof(u32Value));
+    if (pszValue)
+        RTSha256Update(pCtx, pszValue, cbValue);
+}
+
+DECLINLINE(int) CloakManifestHashHex(PCCLOAKBUILDMANIFEST pManifest, char *pszHash, size_t cchHash)
+{
+    if (!pManifest || !pszHash || cchHash < (size_t)CLOAK_SEED_HEX_SIZE + 1)
+        return VERR_INVALID_PARAMETER;
+
+    static const char s_szDomain[] = "VBoxCloakBuildManifestV1";
+    RTSHA256CONTEXT Ctx;
+    RTSha256Init(&Ctx);
+    RTSha256Update(&Ctx, s_szDomain, sizeof(s_szDomain) - 1);
+    CloakManifestHashString(&Ctx, pManifest->pszBuildMode);
+    CloakManifestHashString(&Ctx, pManifest->pszFirmwareFamily);
+    CloakManifestHashString(&Ctx, pManifest->pszPcBiosVersion);
+    CloakManifestHashString(&Ctx, pManifest->pszOvmfVersion);
+    CloakManifestHashString(&Ctx, pManifest->pszDsdtHash);
+    CloakManifestHashString(&Ctx, pManifest->pszVgaBiosHash);
+    CloakManifestHashString(&Ctx, pManifest->pszBiosRomHash);
+
+    uint32_t u32Chipsets = RT_H2LE_U32(pManifest->fSupportedChipsets);
+    RTSha256Update(&Ctx, &u32Chipsets, sizeof(u32Chipsets));
+
+    uint16_t au16Bindings[] =
+    {
+        pManifest->uVmmDevVendorId,
+        pManifest->uVmmDevDeviceId,
+        pManifest->uVgaVendorId,
+        pManifest->uVgaDeviceId,
+        pManifest->uVirtioVendorId
+    };
+    for (size_t i = 0; i < RT_ELEMENTS(au16Bindings); i++)
+    {
+        uint16_t u16Binding = RT_H2LE_U16(au16Bindings[i]);
+        RTSha256Update(&Ctx, &u16Binding, sizeof(u16Binding));
+    }
+
+    CloakManifestHashString(&Ctx, pManifest->pszSourceRevision);
+    CloakManifestHashString(&Ctx, pManifest->pszBuildHash);
+
+    uint8_t abHash[RTSHA256_HASH_SIZE];
+    RTSha256Final(&Ctx, abHash);
+    int vrc = RTStrPrintHexBytes(pszHash, cchHash, abHash, sizeof(abHash), RTSTRPRINTHEXBYTES_F_UPPER);
+    RTMemWipeThoroughly(abHash, sizeof(abHash), 3);
+    RTMemWipeThoroughly(&Ctx, sizeof(Ctx), 3);
     return vrc;
 }
 

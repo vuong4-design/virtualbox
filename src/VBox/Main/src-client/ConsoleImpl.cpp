@@ -409,6 +409,10 @@ Console::Console()
     , mu32SingleRDPClientId(0)
     , mfGuestCredentialsProvided(false)
     , mSavedStateDataLoaded(false)
+    , mfCloakSavedStateIdentityValid(false)
+    , mfCloakSavedStateEnabled(false)
+    , mfCloakCurrentStateIdentityValid(true)
+    , mfCloakCurrentStateEnabled(false)
     , mConsoleVRDPServer(NULL)
     , mfVRDEChangeInProcess(false)
     , mfVRDEChangePending(false)
@@ -1689,10 +1693,12 @@ void Console::i_VRDPInterceptClipboard(uint32_t u32ClientId)
 
 //static
 const char *Console::sSSMConsoleUnit = "ConsoleData";
-/** The saved state version.  */
-#define CONSOLE_SAVED_STATE_VERSION                         UINT32_C(0x00010002)
 /** The saved state version, pre shared folder autoMountPoint.  */
 #define CONSOLE_SAVED_STATE_VERSION_PRE_AUTO_MOUNT_POINT    UINT32_C(0x00010001)
+#define CONSOLE_SAVED_STATE_VERSION_AUTO_MOUNT_POINT        UINT32_C(0x00010002)
+#define CONSOLE_SAVED_STATE_VERSION_CLOAK_IDENTITY          UINT32_C(0x00010003)
+/** The saved state version.  */
+#define CONSOLE_SAVED_STATE_VERSION                         CONSOLE_SAVED_STATE_VERSION_CLOAK_IDENTITY
 
 inline static const char *networkAdapterTypeToName(NetworkAdapterType_T adapterType)
 {
@@ -1859,7 +1865,7 @@ Console::i_saveStateFileExec(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, void *pvUser)
         pVMM->pfnSSMR3PutStrZ(pSSM, rStrAutoMountPoint.c_str());
     }
 
-    return VINF_SUCCESS;
+    return pThat->i_cloakSaveStateIdentity(pSSM, pVMM);
 }
 
 /**
@@ -1953,7 +1959,7 @@ int Console::i_loadStateFileExecInternal(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, ui
             pVMM->pfnSSMR3GetBool(pSSM, &autoMount);
 
         Utf8Str strAutoMountPoint;
-        if (u32Version >= CONSOLE_SAVED_STATE_VERSION)
+        if (u32Version >= CONSOLE_SAVED_STATE_VERSION_AUTO_MOUNT_POINT)
         {
             vrc = pVMM->pfnSSMR3GetU32(pSSM, &cbStr);
             AssertRCReturn(vrc, vrc);
@@ -1976,6 +1982,13 @@ int Console::i_loadStateFileExecInternal(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, ui
         AssertComRCReturn(hrc, VERR_INTERNAL_ERROR);
 
         m_mapSharedFolders.insert(std::make_pair(strName, pSharedFolder));
+    }
+
+    if (u32Version >= CONSOLE_SAVED_STATE_VERSION_CLOAK_IDENTITY)
+    {
+        vrc = i_cloakLoadStateIdentity(pSSM, pVMM);
+        if (RT_FAILURE(vrc))
+            return vrc;
     }
 
     return VINF_SUCCESS;

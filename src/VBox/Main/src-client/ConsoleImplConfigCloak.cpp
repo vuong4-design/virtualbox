@@ -36,6 +36,8 @@
 #include <VBox/err.h>
 #include <VBox/vmm/vmmr3vtable.h>
 
+#define CLOAK_SAVED_STATE_IDENTITY_MAGIC    UINT32_C(0x314b4c43)
+
 static const MACHINEPROFILE *cloakGetTestProfile(void)
 {
     static const MACHINEPROFILE s_Profile = []() -> MACHINEPROFILE
@@ -244,7 +246,12 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
 
     PCFGMNODE pCloak = mpVMM->pfnCFGMR3GetChild(pRoot, "Cloak");
     if (!pCloak)
-        return VINF_SUCCESS;
+    {
+        int vrc = i_cloakSetCurrentStateIdentity(false, NULL, NULL);
+        if (RT_FAILURE(vrc))
+            LogRel(("Cloak: saved state identity check failed, vrc=%Rrc\n", vrc));
+        return vrc;
+    }
 
     bool fEnabled = false;
     int vrc = cloakQueryBool(mpVMM, pCloak, "Enabled", &fEnabled);
@@ -257,6 +264,12 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
     }
     if (!fEnabled)
     {
+        vrc = i_cloakSetCurrentStateIdentity(false, NULL, NULL);
+        if (RT_FAILURE(vrc))
+        {
+            LogRel(("Cloak: saved state identity check failed, vrc=%Rrc\n", vrc));
+            return vrc;
+        }
         LogRel(("Cloak: runtime cloak disabled\n"));
         return VINF_SUCCESS;
     }
@@ -380,6 +393,14 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         return VERR_MISMATCH;
     }
 
+    vrc = i_cloakSetCurrentStateIdentity(true, pProfile->pszProfileId, szSeedHash);
+    if (RT_FAILURE(vrc))
+    {
+        LogRel(("Cloak: saved state identity check failed for profile '%s', vrc=%Rrc\n",
+                pProfile->pszProfileId, vrc));
+        return vrc;
+    }
+
     CLOAKCFGMVTABLE Cfgm = cloakCreateCfgmVTable(mpVMM);
     void *pFirmware = CloakCfgmGetFirmwareConfig(&Cfgm, pRoot);
     if (!pFirmware)
@@ -424,5 +445,141 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
     }
 
     LogRel(("Cloak: profile '%s' materialized\n", pProfile->pszProfileId));
+    return VINF_SUCCESS;
+}
+
+static int cloakSsmPutString(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, const char *pszValue)
+{
+    const char *pszSafe = pszValue ? pszValue : "";
+    size_t cchValue = strlen(pszSafe);
+    if (cchValue >= UINT32_MAX)
+        return VERR_INVALID_PARAMETER;
+
+    int vrc = pVMM->pfnSSMR3PutU32(pSSM, (uint32_t)cchValue + 1);
+    if (RT_SUCCESS(vrc))
+        vrc = pVMM->pfnSSMR3PutStrZ(pSSM, pszSafe);
+    return vrc;
+}
+
+static int cloakSsmGetString(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, char *pszValue, size_t cchValue)
+{
+    uint32_t cbValue = 0;
+    int vrc = pVMM->pfnSSMR3GetU32(pSSM, &cbValue);
+    if (RT_FAILURE(vrc))
+        return vrc;
+    if (cbValue == 0 || cbValue > cchValue)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    return pVMM->pfnSSMR3GetStrZ(pSSM, pszValue, cbValue);
+}
+
+int Console::i_cloakSaveStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertPtrReturn(pVMM, VERR_INVALID_POINTER);
+
+    bool fEnabled = mfCloakCurrentStateIdentityValid && mfCloakCurrentStateEnabled;
+    const char *pszProfileId = fEnabled ? mStrCloakCurrentStateProfileId.c_str() : "";
+    const char *pszSeedHash = fEnabled ? mStrCloakCurrentStateSeedHash.c_str() : "";
+    const char *pszManifestHash = fEnabled ? mStrCloakCurrentStateManifestHash.c_str() : "";
+
+    int vrc = pVMM->pfnSSMR3PutU32(pSSM, CLOAK_SAVED_STATE_IDENTITY_MAGIC);
+    if (RT_SUCCESS(vrc))
+        vrc = pVMM->pfnSSMR3PutBool(pSSM, fEnabled);
+    if (RT_SUCCESS(vrc))
+        vrc = cloakSsmPutString(pSSM, pVMM, pszProfileId);
+    if (RT_SUCCESS(vrc))
+        vrc = cloakSsmPutString(pSSM, pVMM, pszSeedHash);
+    if (RT_SUCCESS(vrc))
+        vrc = cloakSsmPutString(pSSM, pVMM, pszManifestHash);
+    return vrc;
+}
+
+int Console::i_cloakLoadStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
+{
+    AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
+    AssertPtrReturn(pVMM, VERR_INVALID_POINTER);
+
+    uint32_t uMagic = 0;
+    int vrc = pVMM->pfnSSMR3GetU32(pSSM, &uMagic);
+    if (RT_FAILURE(vrc))
+        return vrc;
+    if (uMagic != CLOAK_SAVED_STATE_IDENTITY_MAGIC)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+
+    bool fEnabled = false;
+    vrc = pVMM->pfnSSMR3GetBool(pSSM, &fEnabled);
+    if (RT_FAILURE(vrc))
+        return vrc;
+
+    char szProfileId[CLOAK_PROFILE_ID_MAX] = "";
+    char szSeedHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    char szManifestHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    vrc = cloakSsmGetString(pSSM, pVMM, szProfileId, sizeof(szProfileId));
+    if (RT_SUCCESS(vrc))
+        vrc = cloakSsmGetString(pSSM, pVMM, szSeedHash, sizeof(szSeedHash));
+    if (RT_SUCCESS(vrc))
+        vrc = cloakSsmGetString(pSSM, pVMM, szManifestHash, sizeof(szManifestHash));
+    if (RT_FAILURE(vrc))
+        return vrc;
+
+    if (!fEnabled && (szProfileId[0] || szSeedHash[0] || szManifestHash[0]))
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+
+    CLOAKSTATEIDENTITY Identity = {};
+    vrc = CloakStateIdentitySet(&Identity, fEnabled, szProfileId, szSeedHash, szManifestHash);
+    if (RT_FAILURE(vrc))
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+
+    mfCloakSavedStateEnabled = fEnabled;
+    mStrCloakSavedStateProfileId = Identity.szProfileId;
+    mStrCloakSavedStateSeedHash = Identity.szSeedHash;
+    mStrCloakSavedStateManifestHash = Identity.szManifestHash;
+    mfCloakSavedStateIdentityValid = true;
+    return VINF_SUCCESS;
+}
+
+int Console::i_cloakSetCurrentStateIdentity(bool fEnabled, const char *pszProfileId, const char *pszSeedHash)
+{
+    char szManifestHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    int vrc;
+    if (fEnabled)
+    {
+        vrc = CloakManifestHashHex(CloakGetBuildManifest(), szManifestHash, sizeof(szManifestHash));
+        if (RT_FAILURE(vrc))
+            return vrc;
+    }
+
+    CLOAKSTATEIDENTITY Current = {};
+    vrc = CloakStateIdentitySet(&Current, fEnabled, pszProfileId, pszSeedHash, szManifestHash);
+    if (RT_FAILURE(vrc))
+        return vrc;
+
+    if (mfCloakSavedStateIdentityValid && mSavedStateDataLoaded)
+    {
+        CLOAKSTATEIDENTITY Saved = {};
+        vrc = CloakStateIdentitySet(&Saved, mfCloakSavedStateEnabled,
+                                    mStrCloakSavedStateProfileId.c_str(),
+                                    mStrCloakSavedStateSeedHash.c_str(),
+                                    mStrCloakSavedStateManifestHash.c_str());
+        if (RT_FAILURE(vrc))
+            return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+        if (RT_FAILURE(CloakCompareStateIdentity(&Saved, &Current)))
+        {
+            LogRel(("Cloak: saved state identity does not match the current seed/profile/manifest; "
+                    "refusing restore, delete the saved state or restore the matching cloak configuration\n"));
+            return VERR_SSM_LOAD_CONFIG_MISMATCH;
+        }
+    }
+    else if (fEnabled && mSavedStateDataLoaded)
+    {
+        LogRel(("Cloak: saved state has no cloak identity record; delete the saved state before enabling cloak\n"));
+        return VERR_SSM_LOAD_CONFIG_MISMATCH;
+    }
+
+    mfCloakCurrentStateEnabled = fEnabled;
+    mStrCloakCurrentStateProfileId = pszProfileId ? pszProfileId : "";
+    mStrCloakCurrentStateSeedHash = pszSeedHash ? pszSeedHash : "";
+    mStrCloakCurrentStateManifestHash = szManifestHash;
+    mfCloakCurrentStateIdentityValid = true;
     return VINF_SUCCESS;
 }

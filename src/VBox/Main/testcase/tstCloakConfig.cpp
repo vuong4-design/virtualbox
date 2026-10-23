@@ -572,6 +572,80 @@ static void testProductionRegistry(RTTEST hTest)
     RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apOne, RT_ELEMENTS(apOne), &BadManifest), VERR_NOT_SUPPORTED);
 }
 
+static void testManifestHashAndStateIdentity(RTTEST hTest)
+{
+    RTTestSub(hTest, "Manifest hash and saved-state identity");
+
+    CLOAKBUILDMANIFEST Manifest = {};
+    Manifest.pszBuildMode = "cloak";
+    Manifest.pszFirmwareFamily = "ami";
+    Manifest.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
+    Manifest.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+    Manifest.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+    Manifest.uVgaVendorId = CLOAKBINDING_VGA_VENDOR_ID;
+    Manifest.uVgaDeviceId = CLOAKBINDING_VGA_DEVICE_ID;
+    Manifest.uVirtioVendorId = CLOAKBINDING_VIRTIO_VENDOR_ID;
+    Manifest.pszDsdtHash = "sha256:dsdt";
+    Manifest.pszVgaBiosHash = "sha256:vga";
+    Manifest.pszBiosRomHash = "sha256:bios";
+    Manifest.pszSourceRevision = "abcdef0";
+    Manifest.pszBuildHash = "sha256:build";
+
+    char szHashA[CLOAK_SEED_HEX_SIZE + 1] = "";
+    char szHashB[CLOAK_SEED_HEX_SIZE + 1] = "";
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Manifest, szHashA, sizeof(szHashA)), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Manifest, szHashB, sizeof(szHashB)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szHashA, szHashB));
+    RTTESTI_CHECK(strlen(szHashA) == CLOAK_SEED_HEX_SIZE);
+
+    CLOAKBUILDMANIFEST Changed = Manifest;
+    Changed.pszBuildHash = "sha256:build2";
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Changed, szHashB, sizeof(szHashB)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szHashA, szHashB));
+
+    Changed = Manifest;
+    Changed.uVgaDeviceId = 0x1234;
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Changed, szHashB, sizeof(szHashB)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szHashA, szHashB));
+
+    RTTESTI_CHECK_RC(CloakManifestHashHex(NULL, szHashB, sizeof(szHashB)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Manifest, NULL, sizeof(szHashB)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakManifestHashHex(&Manifest, szHashB, CLOAK_SEED_HEX_SIZE), VERR_INVALID_PARAMETER);
+
+    CLOAKSTATEIDENTITY Saved = {};
+    CLOAKSTATEIDENTITY Current = {};
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Saved, false, NULL, NULL, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, false, NULL, NULL, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityEquals(&Saved, &Current));
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Saved, true, "profile-a", szHashA, szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, true, "profile-a", szHashA, szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityEquals(&Saved, &Current));
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, true, "profile-b", szHashA, szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VERR_MISMATCH);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, true, "profile-a", szHashB, szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VERR_MISMATCH);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, true, "profile-a", szHashA, szHashB), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VERR_MISMATCH);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, false, NULL, NULL, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(&Saved, &Current), VERR_MISMATCH);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Current, false, "ignored", szHashA, szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK(!Current.szProfileId[0]);
+    RTTESTI_CHECK(!Current.szSeedHash[0]);
+    RTTESTI_CHECK(!Current.szManifestHash[0]);
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Saved, true, "profile-a", "short", szHashA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Saved, true, NULL, szHashA, szHashA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakCompareStateIdentity(NULL, &Current), VERR_INVALID_PARAMETER);
+}
+
 static void testSeedHash(RTTEST hTest)
 {
     RTTestSub(hTest, "Seed hash");
@@ -822,6 +896,7 @@ int main()
         testBuildManifestValidation(hTest);
         testManifestValidation(hTest);
         testProductionRegistry(hTest);
+        testManifestHashAndStateIdentity(hTest);
         testSeedHash(hTest);
         testChassisType(hTest);
         testProfileMaterializationFields(hTest);
