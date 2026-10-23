@@ -998,6 +998,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 self-test failed: $LASTEXITCODE" }
           & ".\scripts\t3-runtime.ps1" -ValidateConfig -ConfigPath ".\scripts\testdata\t3-config.sample.json";
           if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 config validation failed: $LASTEXITCODE" }
+          $stateConfig = Join-Path $env:RUNNER_TEMP "t3-state-on.json";
+          (Get-Content ".\scripts\testdata\t3-config.sample.json" -Raw -Encoding UTF8) -replace '"stateTest": false', '"stateTest": true' | Set-Content -LiteralPath $stateConfig -Encoding utf8;
+          & ".\scripts\t3-runtime.ps1" -ValidateConfig -ConfigPath $stateConfig;
+          if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 stateTest config validation failed: $LASTEXITCODE" }
 
       - name: Verify generated build identity manifest
         shell: pwsh

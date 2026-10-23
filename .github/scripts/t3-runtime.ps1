@@ -18,6 +18,13 @@
     Không fallback sang hosted runner: thiếu VBoxDrv/VT-x -> exit 3 (fail).
     "No bootable device" không phải T3: collector phải chạy được trong guest.
 
+    Nếu config bật `stateTest` (§4.6.5), sau các boot cold còn chạy thêm:
+      - save state -> resume -> identity phải giống baseline
+      - save state -> đổi seed -> resume phải bị từ chối (fail rõ)
+      - snapshot -> restore -> identity phải giống baseline
+      - snapshot -> đổi seed -> restore/start phải bị từ chối
+    Negative test cần cloak build + seed đã provision (`provision-cloak.ps1`).
+
     Report chỉ chứa dữ liệu đã redact (comparator mặc định redact giá trị);
     raw dump giữ local trong WorkDir, không upload.
 
@@ -42,6 +49,15 @@
         1 = có khác biệt identity
         2 = lỗi cấu hình/thực thi
         3 = runtime target không khả dụng (VBoxDrv/VT-x)
+
+    Khóa config tùy chọn:
+        runs                   số boot cold (2..10, mặc định 3)
+        bootTimeoutSeconds     chờ VM vào running (mặc định 180)
+        captureDelaySeconds    chờ guest userspace trước khi capture (mặc định 20)
+        stateTest              true -> bật test saved-state/snapshot (§4.6.5)
+        stateTests             ghi đè từng test: saveStateRestore, saveStateSeedMismatch,
+                               snapshotRestore, snapshotSeedMismatch
+        snapshotName           tên snapshot tạm (mặc định cloak-t3-state)
 
     Placeholder trong `fetchCommand`:
         {vboxmanage}       đường dẫn VBoxManage.exe
@@ -244,6 +260,41 @@ function Read-T3Config {
     $bootTimeout = Get-T3Property -Object $document -Name 'bootTimeoutSeconds' -Default $script:T3BootTimeoutDefault
     $captureDelay = Get-T3Property -Object $document -Name 'captureDelaySeconds' -Default $script:T3CaptureDelayDefault
 
+    $stateTest = Get-T3Property -Object $document -Name 'stateTest' -Default $false
+    if ($stateTest -isnot [bool]) {
+        Write-ErrorLine "config: 'stateTest' must be a boolean."
+        exit 2
+    }
+    $snapshotName = Get-T3Property -Object $document -Name 'snapshotName' -Default 'cloak-t3-state'
+    if ([string] $snapshotName -notmatch '^[A-Za-z0-9._-]+$') {
+        Write-ErrorLine "config: 'snapshotName' must match [A-Za-z0-9._-]+."
+        exit 2
+    }
+    $stateTests = [ordered] @{
+        SaveStateRestore      = [bool] $stateTest
+        SaveStateSeedMismatch = [bool] $stateTest
+        SnapshotRestore       = [bool] $stateTest
+        SnapshotSeedMismatch  = [bool] $stateTest
+    }
+    $stateTestsRaw = Get-T3Property -Object $document -Name 'stateTests' -Default $null
+    if ($null -ne $stateTestsRaw) {
+        $stateTestKeys = @{
+            SaveStateRestore      = 'saveStateRestore'
+            SaveStateSeedMismatch = 'saveStateSeedMismatch'
+            SnapshotRestore       = 'snapshotRestore'
+            SnapshotSeedMismatch  = 'snapshotSeedMismatch'
+        }
+        foreach ($stateTestKey in $stateTestKeys.Keys) {
+            $rawValue = Get-T3Property -Object $stateTestsRaw -Name $stateTestKeys[$stateTestKey] -Default $null
+            if ($null -eq $rawValue) { continue }
+            if ($rawValue -isnot [bool]) {
+                Write-ErrorLine "config: stateTests.$($stateTestKeys[$stateTestKey]) must be a boolean."
+                exit 2
+            }
+            $stateTests[$stateTestKey] = [bool] $rawValue
+        }
+    }
+
     $guests = Get-T3Property -Object $document -Name 'guests' -Default $null
     if ($null -eq $guests) {
         Write-ErrorLine "config: 'guests' is required."
@@ -308,6 +359,9 @@ function Read-T3Config {
         Runs                 = [int] $runs
         BootTimeoutSeconds   = [int] $bootTimeout
         CaptureDelaySeconds  = [int] $captureDelay
+        StateTest            = [bool] $stateTest
+        StateTests           = [pscustomobject] $stateTests
+        SnapshotName         = [string] $snapshotName
         UsesPassword         = $usesPassword
         Guests               = $guestList.ToArray()
     }
@@ -387,6 +441,431 @@ function Invoke-T3GuestFetch {
         }
         Start-Sleep -Seconds 10
     }
+}
+
+# ---------------------------------------------------------------------------
+# Saved state / snapshot tests (§4.6.5)
+# ---------------------------------------------------------------------------
+function Get-T3VmState {
+    param([string] $Name)
+
+    $info = Invoke-T3VBoxManage 'showvminfo' $Name '--machinereadable'
+    if ($info -match '(?m)^VMState="([^"]+)"') { return $Matches[1] }
+    return ''
+}
+
+function Wait-T3VmState {
+    param(
+        [string] $Name,
+        [string[]] $States,
+        [int] $TimeoutSeconds = 180
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $state = Get-T3VmState -Name $Name
+        if ($States -contains $state) { return $true }
+        if ($state -in @('poweroff', 'aborted', 'stopped') -and -not ($States -contains $state)) {
+            return $false
+        }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Seconds 2
+    }
+}
+
+function Get-T3ExtraData {
+    param(
+        [string] $Name,
+        [string] $Key
+    )
+
+    $raw = Invoke-T3VBoxManage 'getextradata' $Name $Key
+    if ($raw -match '(?m)^Value:\s*(.+?)\s*$') { return $Matches[1] }
+    return ''
+}
+
+function Set-T3ExtraData {
+    param(
+        [string] $Name,
+        [string] $Key,
+        [string] $Value
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        $null = Invoke-T3VBoxManage 'setextradata' $Name $Key
+    }
+    else {
+        $null = Invoke-T3VBoxManage 'setextradata' $Name $Key $Value
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "setextradata '$Key' failed (exit $LASTEXITCODE)."
+    }
+}
+
+function Get-T3MutatedHex {
+    param([string] $Hex)
+
+    if ($Hex -notmatch '^[0-9a-fA-F]{64}$') { return '' }
+    $normalized = $Hex.ToLowerInvariant()
+    $first = '1'
+    if ($normalized.Substring(0, 1) -eq '1') { $first = '0' }
+    return $first + $normalized.Substring(1)
+}
+
+function Get-T3MutatedSeedValue {
+    param([string] $Value)
+
+    if ($Value -notmatch '^string:([0-9a-fA-F]{64})$') { return '' }
+    $mutated = Get-T3MutatedHex -Hex $Matches[1]
+    if ([string]::IsNullOrEmpty($mutated)) { return '' }
+    return 'string:' + $mutated
+}
+
+function Clear-T3VmState {
+    param([string] $Name)
+
+    $state = Get-T3VmState -Name $Name
+    if ($state -in @('running', 'paused', 'gurumeditation')) {
+        $null = Invoke-T3VBoxManage 'controlvm' $Name 'poweroff'
+        Start-Sleep -Seconds 5
+        $state = Get-T3VmState -Name $Name
+    }
+    if ($state -eq 'saved' -or $state -eq 'aborted') {
+        $null = Invoke-T3VBoxManage 'discardstate' $Name
+        Start-Sleep -Seconds 3
+    }
+}
+
+function Invoke-T3RunningCapture {
+    param(
+        $Guest,
+        [string] $RunDir
+    )
+
+    $null = New-Item -ItemType Directory -Force -Path $RunDir
+
+    $null = Invoke-T3VBoxManage 'showvminfo' $Guest.Name '--machinereadable' |
+        Set-Content -LiteralPath (Join-Path $RunDir 'vminfo.txt') -Encoding utf8
+
+    foreach ($item in $script:T3InfoItems) {
+        $arguments = @('debugvm', $Guest.Name, 'info', $item)
+        if ($item -eq 'pci') { $arguments += 'verbose' }
+        $text = Invoke-T3VBoxManage @arguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "debugvm info $item failed (exit $LASTEXITCODE): $text"
+        }
+        $text | Set-Content -LiteralPath (Join-Path $RunDir "info-$item.txt") -Encoding utf8
+    }
+
+    Invoke-T3GuestFetch -Guest $Guest -LocalPath (Join-Path $RunDir 'guest-identity.json') -LogPath (Join-Path $RunDir 'guest-fetch.txt')
+}
+
+function New-T3StateResult {
+    param(
+        [string] $Status,
+        [string] $Detail
+    )
+
+    return [pscustomobject] @{
+        status = $Status
+        detail = $Detail
+    }
+}
+
+function Invoke-T3SeedMismatchProbe {
+    param(
+        [string] $Name,
+        $Config
+    )
+
+    $startOutput = Invoke-T3VBoxManage 'startvm' $Name '--type' 'headless'
+    $startExit = $LASTEXITCODE
+    if ($startExit -ne 0) {
+        return New-T3StateResult 'pass' "startvm refused (exit $startExit)"
+    }
+
+    $deadline = (Get-Date).AddSeconds($Config.BootTimeoutSeconds)
+    $finalState = ''
+    while ((Get-Date) -lt $deadline) {
+        $state = Get-T3VmState -Name $Name
+        if ($state -eq 'running') { $finalState = 'running'; break }
+        if ($state -in @('poweroff', 'aborted', 'stopped')) { $finalState = $state; break }
+        Start-Sleep -Seconds 2
+    }
+
+    if ($finalState -eq 'running') {
+        $null = Invoke-T3VBoxManage 'controlvm' $Name 'poweroff'
+        Start-Sleep -Seconds 5
+        return New-T3StateResult 'fail' 'VM resumed with mismatched seed (identity would be mixed)'
+    }
+    if ($finalState -in @('poweroff', 'aborted', 'stopped')) {
+        return New-T3StateResult 'pass' "VM refused to reach running (state=$finalState)"
+    }
+    return New-T3StateResult 'error' "VM state ambiguous after seed mismatch (state='$finalState')"
+}
+
+function Compare-T3StateCapture {
+    param(
+        $Guest,
+        [string] $BaselineDir,
+        [string] $StateDir,
+        [string] $ComparatorPath
+    )
+
+    $hostComparison = Compare-T3HostRun -BaselineDir $BaselineDir -CandidateDir $StateDir
+    if ($hostComparison.Status -eq 'error') {
+        return [pscustomobject] @{
+            Status = 'error'
+            Detail = 'host capture incomplete: ' + ($hostComparison.Errors -join ',')
+        }
+    }
+    if ($hostComparison.Status -eq 'fail') {
+        return [pscustomobject] @{
+            Status = 'fail'
+            Detail = 'host diffs: ' + ($hostComparison.Diffs -join ',')
+        }
+    }
+
+    $comparison = Invoke-T3GuestComparison -ComparatorPath $ComparatorPath `
+        -BaselinePath (Join-Path $BaselineDir 'guest-identity.json') `
+        -CandidatePath (Join-Path $StateDir 'guest-identity.json') `
+        -ReportPath (Join-Path $StateDir 'guest-compare.json')
+
+    if ($comparison.ExitCode -eq 1) {
+        return [pscustomobject] @{
+            Status = 'fail'
+            Detail = 'guest diffs: ' + ($comparison.Differences -join ',')
+        }
+    }
+    if ($comparison.ExitCode -ne 0) {
+        return [pscustomobject] @{
+            Status = 'error'
+            Detail = "comparator exit $($comparison.ExitCode)"
+        }
+    }
+    return [pscustomobject] @{
+        Status = 'pass'
+        Detail = 'identity identical to baseline'
+    }
+}
+
+function Invoke-T3StateTests {
+    param(
+        $Guest,
+        $Config,
+        [string] $ComparatorPath,
+        [string] $BaselineDir,
+        [string] $StateRoot
+    )
+
+    $results = [ordered] @{}
+    $seedKey = 'VBoxInternal/Cloak/Seed'
+    $seedHashKey = 'VBoxInternal/Cloak/SeedHash'
+    $snapshotName = $Config.SnapshotName
+
+    if ($Config.StateTests.SaveStateRestore) {
+        $dir = Join-Path $StateRoot 'save-restore'
+        $status = 'error'
+        $detail = ''
+        try {
+            Clear-T3VmState -Name $Guest.Name
+            $startOutput = Invoke-T3VBoxManage 'startvm' $Guest.Name '--type' 'headless'
+            if ($LASTEXITCODE -ne 0) { throw "startvm failed (exit $LASTEXITCODE): $startOutput" }
+            if (-not (Wait-T3VmRunning -Name $Guest.Name -TimeoutSeconds $Config.BootTimeoutSeconds)) {
+                throw 'VM did not reach running.'
+            }
+            Start-Sleep -Seconds $Config.CaptureDelaySeconds
+
+            $null = Invoke-T3VBoxManage 'controlvm' $Guest.Name 'savestate'
+            if (-not (Wait-T3VmState -Name $Guest.Name -States @('saved') -TimeoutSeconds 180)) {
+                throw 'VM did not reach saved state.'
+            }
+            Start-Sleep -Seconds 3
+
+            $startOutput = Invoke-T3VBoxManage 'startvm' $Guest.Name '--type' 'headless'
+            if ($LASTEXITCODE -ne 0) { throw "resume failed (exit $LASTEXITCODE): $startOutput" }
+            if (-not (Wait-T3VmRunning -Name $Guest.Name -TimeoutSeconds $Config.BootTimeoutSeconds)) {
+                throw 'VM did not resume to running.'
+            }
+            Start-Sleep -Seconds $Config.CaptureDelaySeconds
+
+            Invoke-T3RunningCapture -Guest $Guest -RunDir $dir
+            $status = 'pass'
+            $detail = 'resumed capture written'
+        }
+        catch {
+            $status = 'error'
+            $detail = $_.Exception.Message
+        }
+        finally {
+            Clear-T3VmState -Name $Guest.Name
+        }
+
+        if ($status -eq 'pass') {
+            $comparison = Compare-T3StateCapture -Guest $Guest -BaselineDir $BaselineDir -StateDir $dir -ComparatorPath $ComparatorPath
+            $status = $comparison.Status
+            $detail = $comparison.Detail
+        }
+        $results['saveStateRestore'] = New-T3StateResult $status $detail
+    }
+
+    if ($Config.StateTests.SaveStateSeedMismatch) {
+        $status = 'error'
+        $detail = ''
+        $seedRaw = ''
+        $seedHashRaw = ''
+        try {
+            Clear-T3VmState -Name $Guest.Name
+            $seedRaw = Get-T3ExtraData -Name $Guest.Name -Key $seedKey
+            $seedHashRaw = Get-T3ExtraData -Name $Guest.Name -Key $seedHashKey
+            if ([string]::IsNullOrEmpty($seedRaw) -or [string]::IsNullOrEmpty($seedHashRaw)) {
+                throw "seed not provisioned ('$seedKey'/'$seedHashKey' missing); run provision-cloak.ps1 first."
+            }
+            $mutatedSeed = Get-T3MutatedSeedValue -Value $seedRaw
+            $mutatedHash = Get-T3MutatedHex -Hex $seedHashRaw
+            if ([string]::IsNullOrEmpty($mutatedSeed) -or [string]::IsNullOrEmpty($mutatedHash)) {
+                throw "unrecognized seed/seed-hash format ('$seedRaw' / '$seedHashRaw')."
+            }
+
+            $startOutput = Invoke-T3VBoxManage 'startvm' $Guest.Name '--type' 'headless'
+            if ($LASTEXITCODE -ne 0) { throw "startvm failed (exit $LASTEXITCODE): $startOutput" }
+            if (-not (Wait-T3VmRunning -Name $Guest.Name -TimeoutSeconds $Config.BootTimeoutSeconds)) {
+                throw 'VM did not reach running.'
+            }
+            Start-Sleep -Seconds $Config.CaptureDelaySeconds
+
+            $null = Invoke-T3VBoxManage 'controlvm' $Guest.Name 'savestate'
+            if (-not (Wait-T3VmState -Name $Guest.Name -States @('saved') -TimeoutSeconds 180)) {
+                throw 'VM did not reach saved state.'
+            }
+            Start-Sleep -Seconds 3
+
+            Set-T3ExtraData -Name $Guest.Name -Key $seedKey -Value $mutatedSeed
+            Set-T3ExtraData -Name $Guest.Name -Key $seedHashKey -Value $mutatedHash
+
+            $probe = Invoke-T3SeedMismatchProbe -Name $Guest.Name -Config $Config
+            $status = $probe.status
+            $detail = $probe.detail
+        }
+        catch {
+            $status = 'error'
+            $detail = $_.Exception.Message
+        }
+        finally {
+            if (-not [string]::IsNullOrEmpty($seedRaw)) {
+                try { Set-T3ExtraData -Name $Guest.Name -Key $seedKey -Value $seedRaw } catch { }
+            }
+            if (-not [string]::IsNullOrEmpty($seedHashRaw)) {
+                try { Set-T3ExtraData -Name $Guest.Name -Key $seedHashKey -Value $seedHashRaw } catch { }
+            }
+            Clear-T3VmState -Name $Guest.Name
+        }
+        $results['saveStateSeedMismatch'] = New-T3StateResult $status $detail
+    }
+
+    if ($Config.StateTests.SnapshotRestore) {
+        $dir = Join-Path $StateRoot 'snapshot-restore'
+        $status = 'error'
+        $detail = ''
+        try {
+            Clear-T3VmState -Name $Guest.Name
+            $null = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'take' $snapshotName '--description' 't3 state test'
+            if ($LASTEXITCODE -ne 0) { throw "snapshot take failed (exit $LASTEXITCODE)." }
+
+            $startOutput = Invoke-T3VBoxManage 'startvm' $Guest.Name '--type' 'headless'
+            if ($LASTEXITCODE -ne 0) { throw "startvm failed (exit $LASTEXITCODE): $startOutput" }
+            if (-not (Wait-T3VmRunning -Name $Guest.Name -TimeoutSeconds $Config.BootTimeoutSeconds)) {
+                throw 'VM did not reach running.'
+            }
+            Start-Sleep -Seconds $Config.CaptureDelaySeconds
+
+            $null = Invoke-T3VBoxManage 'controlvm' $Guest.Name 'poweroff'
+            Start-Sleep -Seconds 5
+
+            $null = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'restore' $snapshotName
+            if ($LASTEXITCODE -ne 0) { throw "snapshot restore failed (exit $LASTEXITCODE)." }
+
+            $startOutput = Invoke-T3VBoxManage 'startvm' $Guest.Name '--type' 'headless'
+            if ($LASTEXITCODE -ne 0) { throw "startvm after restore failed (exit $LASTEXITCODE): $startOutput" }
+            if (-not (Wait-T3VmRunning -Name $Guest.Name -TimeoutSeconds $Config.BootTimeoutSeconds)) {
+                throw 'VM did not reach running after restore.'
+            }
+            Start-Sleep -Seconds $Config.CaptureDelaySeconds
+
+            Invoke-T3RunningCapture -Guest $Guest -RunDir $dir
+            $status = 'pass'
+            $detail = 'restored capture written'
+        }
+        catch {
+            $status = 'error'
+            $detail = $_.Exception.Message
+        }
+        finally {
+            Clear-T3VmState -Name $Guest.Name
+            $null = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'delete' $snapshotName
+        }
+
+        if ($status -eq 'pass') {
+            $comparison = Compare-T3StateCapture -Guest $Guest -BaselineDir $BaselineDir -StateDir $dir -ComparatorPath $ComparatorPath
+            $status = $comparison.Status
+            $detail = $comparison.Detail
+        }
+        $results['snapshotRestore'] = New-T3StateResult $status $detail
+    }
+
+    if ($Config.StateTests.SnapshotSeedMismatch) {
+        $status = 'error'
+        $detail = ''
+        $seedRaw = ''
+        $seedHashRaw = ''
+        try {
+            Clear-T3VmState -Name $Guest.Name
+            $seedRaw = Get-T3ExtraData -Name $Guest.Name -Key $seedKey
+            $seedHashRaw = Get-T3ExtraData -Name $Guest.Name -Key $seedHashKey
+            if ([string]::IsNullOrEmpty($seedRaw) -or [string]::IsNullOrEmpty($seedHashRaw)) {
+                throw "seed not provisioned ('$seedKey'/'$seedHashKey' missing); run provision-cloak.ps1 first."
+            }
+            $mutatedSeed = Get-T3MutatedSeedValue -Value $seedRaw
+            $mutatedHash = Get-T3MutatedHex -Hex $seedHashRaw
+            if ([string]::IsNullOrEmpty($mutatedSeed) -or [string]::IsNullOrEmpty($mutatedHash)) {
+                throw "unrecognized seed/seed-hash format ('$seedRaw' / '$seedHashRaw')."
+            }
+
+            $null = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'take' $snapshotName '--description' 't3 state test'
+            if ($LASTEXITCODE -ne 0) { throw "snapshot take failed (exit $LASTEXITCODE)." }
+
+            Set-T3ExtraData -Name $Guest.Name -Key $seedKey -Value $mutatedSeed
+            Set-T3ExtraData -Name $Guest.Name -Key $seedHashKey -Value $mutatedHash
+
+            $restoreOutput = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'restore' $snapshotName
+            if ($LASTEXITCODE -ne 0) {
+                $status = 'pass'
+                $detail = "snapshot restore refused (exit $LASTEXITCODE)"
+            }
+            else {
+                $probe = Invoke-T3SeedMismatchProbe -Name $Guest.Name -Config $Config
+                $status = $probe.status
+                $detail = 'after restore: ' + $probe.detail
+            }
+        }
+        catch {
+            $status = 'error'
+            $detail = $_.Exception.Message
+        }
+        finally {
+            if (-not [string]::IsNullOrEmpty($seedRaw)) {
+                try { Set-T3ExtraData -Name $Guest.Name -Key $seedKey -Value $seedRaw } catch { }
+            }
+            if (-not [string]::IsNullOrEmpty($seedHashRaw)) {
+                try { Set-T3ExtraData -Name $Guest.Name -Key $seedHashKey -Value $seedHashRaw } catch { }
+            }
+            Clear-T3VmState -Name $Guest.Name
+            $null = Invoke-T3VBoxManage 'snapshot' $Guest.Name 'delete' $snapshotName
+        }
+        $results['snapshotSeedMismatch'] = New-T3StateResult $status $detail
+    }
+
+    return [pscustomobject] $results
 }
 
 # ---------------------------------------------------------------------------
@@ -582,6 +1061,16 @@ function Invoke-T3SelfTest {
             -ReportPath $mismatchReport
         Assert-T3SelfTest -Name 'guest device id change fails' -Condition ($mismatch.ExitCode -eq 1 -and $mismatch.Differences -ge 1)
 
+        Write-Step 'Self-test: seed mutation helpers'
+        $seedValue = 'string:' + '0' + ('a' * 63)
+        $mutatedSeed = Get-T3MutatedSeedValue -Value $seedValue
+        Assert-T3SelfTest -Name 'seed mutation flips first nibble' -Condition ($mutatedSeed -eq ('string:' + '1' + ('a' * 63)))
+        Assert-T3SelfTest -Name 'seed mutation rejects malformed value' -Condition ((Get-T3MutatedSeedValue -Value 'nope') -eq '')
+        $hashValue = '1' + ('b' * 63)
+        $mutatedHash = Get-T3MutatedHex -Hex $hashValue
+        Assert-T3SelfTest -Name 'hash mutation flips first nibble' -Condition ($mutatedHash -eq ('0' + ('b' * 63)))
+        Assert-T3SelfTest -Name 'hash mutation rejects malformed value' -Condition ((Get-T3MutatedHex -Hex 'nothex') -eq '')
+
         Write-Step 'Self-test: report writing'
         $reportPath = Join-Path $root 't3-report.json'
         $guestReports = @(
@@ -593,11 +1082,15 @@ function Invoke-T3SelfTest {
                 guest = @(
                     [pscustomobject] @{ run = 2; status = 'match'; differences = 0; volatile = 1; report = 'match.compare.json' }
                 )
+                state = [pscustomobject] @{
+                    saveStateRestore = [pscustomobject] @{ status = 'pass'; detail = 'identity identical to baseline' }
+                }
             }
         )
         Write-T3Report -Path $reportPath -Status 'pass' -Guests $guestReports -Runs 3
         $written = (Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8) | ConvertFrom-Json
         Assert-T3SelfTest -Name 'report is valid JSON with schema' -Condition ($written.reportFormatVersion -eq 1 -and $written.status -eq 'pass')
+        Assert-T3SelfTest -Name 'report carries state test results' -Condition ($written.guests[0].state.saveStateRestore.status -eq 'pass')
     }
     finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
@@ -680,8 +1173,6 @@ foreach ($guest in $config.Guests) {
     for ($run = 1; $run -le $config.Runs; $run++) {
         $runDir = Join-Path $WorkDir (Join-Path "run$run" $guest.Name)
         $null = New-Item -ItemType Directory -Force -Path $runDir
-        $localGuestJson = Join-Path $runDir 'guest-identity.json'
-        $fetchLog = Join-Path $runDir 'guest-fetch.txt'
 
         Write-Step "Boot $run/$($config.Runs) - $($guest.Name)"
         $started = $false
@@ -699,20 +1190,7 @@ foreach ($guest in $config.Guests) {
 
             Start-Sleep -Seconds $config.CaptureDelaySeconds
 
-            $null = Invoke-T3VBoxManage 'showvminfo' $guest.Name '--machinereadable' |
-                Set-Content -LiteralPath (Join-Path $runDir 'vminfo.txt') -Encoding utf8
-
-            foreach ($item in $script:T3InfoItems) {
-                $arguments = @('debugvm', $guest.Name, 'info', $item)
-                if ($item -eq 'pci') { $arguments += 'verbose' }
-                $text = Invoke-T3VBoxManage @arguments
-                if ($LASTEXITCODE -ne 0) {
-                    throw "debugvm info $item failed (exit $LASTEXITCODE): $text"
-                }
-                $text | Set-Content -LiteralPath (Join-Path $runDir "info-$item.txt") -Encoding utf8
-            }
-
-            Invoke-T3GuestFetch -Guest $guest -LocalPath $localGuestJson -LogPath $fetchLog
+            Invoke-T3RunningCapture -Guest $guest -RunDir $runDir
             $capturedRuns++
         }
         catch {
@@ -798,6 +1276,26 @@ foreach ($guest in $config.Guests) {
         }
     }
 
+    $stateReport = $null
+    if ($config.StateTest -and -not $guestError -and $capturedRuns -eq $config.Runs) {
+        Write-Step "State tests (saved-state/snapshot) - $($guest.Name)"
+        $stateReport = Invoke-T3StateTests -Guest $guest -Config $config -ComparatorPath $comparatorPath `
+            -BaselineDir (Join-Path $WorkDir (Join-Path 'run1' $guest.Name)) `
+            -StateRoot (Join-Path $WorkDir (Join-Path 'state' $guest.Name))
+        foreach ($property in $stateReport.PSObject.Properties) {
+            $testStatus = $property.Value.status
+            Write-Host "    $($property.Name): $testStatus - $($property.Value.detail)"
+            if ($testStatus -eq 'fail') {
+                $guestStatus = 'fail'
+                $anyMismatch = $true
+            }
+            elseif ($testStatus -eq 'error') {
+                $guestStatus = 'error'
+                $anyError = $true
+            }
+        }
+    }
+
     $guestReports.Add([pscustomobject] @{
         name     = $guest.Name
         platform = $guest.Platform
@@ -805,6 +1303,7 @@ foreach ($guest in $config.Guests) {
         error    = $guestError
         host     = $hostReport
         guest    = $guestReportList.ToArray()
+        state    = $stateReport
     })
 }
 

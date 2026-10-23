@@ -860,7 +860,7 @@ Test bắt buộc:
 | Export/import giữ UUID | Identity giữ nguyên |
 | Export/import đổi UUID | Field seed-derived đổi có kiểm soát |
 
-Task implementation: `1.0.12` (state guard + hash) và test T3 `0.4.3c`.
+Task implementation: `1.0.12` (state guard + hash) và test T3 `0.4.3c`. Phía T3: `t3-runtime.ps1` đã có `stateTest` (4 case save-state/snapshot + negative seed-mismatch, so với baseline run1); còn chờ runner O8 + guard `1.0.12` để chạy thật.
 
 #### 4.6.6 Cách ép 1 profile cụ thể (cho test)
 
@@ -979,7 +979,7 @@ Quy tắc:
 - T3 phải có ít nhất **1 guest Windows + 1 guest Linux**, vì binding VMMDev/VGA/virtio có thể khác nhau theo GA/driver.
 - `showvminfo` không đọc CFGM nội bộ; T3 dùng `debugvm <vm> info pci verbose` + collector trong guest. Nếu cần kiểm tra materialize, thêm debug-info `cfgm` test-only.
 - T3 chỉ có ý nghĩa khi guest thực sự boot tới userspace và collector chạy xong; “no bootable device” không phải T3.
-- **Hiện trạng:** job `t3-runtime` đã có (chỉ chạy khi dispatch với input `run_t3` + biến repo `CLOAK_T3_ENABLED='true'`) và orchestrator `t3-runtime.ps1` có self-test xanh trong `smoke`; guest collector + comparator đã có; **chờ runner self-hosted (O8)** để capture thật 3 boot; script host `collect-identity.ps1` vẫn chỉ chạy 2 lần.
+- **Hiện trạng:** job `t3-runtime` đã có (chỉ chạy khi dispatch với input `run_t3` + biến repo `CLOAK_T3_ENABLED='true'`) và orchestrator `t3-runtime.ps1` có self-test xanh trong `smoke`; orchestrator đã có `stateTest` cho §4.6.5: save-state → resume, snapshot → restore (so baseline, fail nếu khác) + 2 negative test đổi seed/seed-hash (kỳ vọng resume/restore bị từ chối); guest collector + comparator đã có; **chờ runner self-hosted (O8)** để capture thật 3 boot + state test; script host `collect-identity.ps1` vẫn chỉ chạy 2 lần.
 
 Yêu cầu VM cho T3:
 - Guest Windows (PE/WinPE hoặc image test) và Linux live có disk ảo; T3 dùng VM có disk, **không** dùng chế độ no-disk của script host; `debugvm` chạy trên chính VM đó.
@@ -1128,7 +1128,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | 🟡 **một phần** | Job `t3-runtime` (gated: dispatch `run_t3` + biến `CLOAK_T3_ENABLED`) + `.github/scripts/t3-runtime.ps1` (self-test xanh trong `smoke`); fail exit 3 nếu thiếu `VBoxDrv`/VT-x; **chờ runner O8** |
 | 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | 🟡 **một phần** | Script Windows/Linux viết xong theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 (0.4.3) |
 | 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
-| 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | ⬜ **chưa làm** | 3 boot giống hệt; state restore không trộn identity |
+| 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | 🟡 **một phần** | `t3-runtime.ps1` có `stateTest` (§4.6.5): save-state→resume + snapshot→restore so baseline (fail nếu khác), 2 negative test đổi seed/seed-hash kỳ vọng bị từ chối; self-test xanh trong `smoke`; capture thật chờ runner O8 + guard `1.0.12` |
 | 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
 | 0.4.5 | T3 artifact isolation/redaction | T3 job + script | ⬜ **chưa làm** | Report redact; không seed/.vbox/raw DMI trong artifact |
 
@@ -2037,7 +2037,7 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
 [x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
 [~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke)
-[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke); chờ runner O8
+[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5); chờ runner O8
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -2051,7 +2051,7 @@ Chỉ bắt đầu code identity khi:
 | `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 dùng `t3-runtime.ps1` (3 boot + comparator); chờ runner O8 |
-| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
+| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
 | `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
 | `.gitignore` | Bỏ qua `build-identity.json`, `source-revision.txt`, `CloakBuildIdentity.h` |

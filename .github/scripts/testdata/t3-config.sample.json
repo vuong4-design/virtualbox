@@ -2,6 +2,14 @@
   "runs": 3,
   "bootTimeoutSeconds": 180,
   "captureDelaySeconds": 20,
+  "stateTest": false,
+  "stateTests": {
+    "saveStateRestore": true,
+    "saveStateSeedMismatch": true,
+    "snapshotRestore": true,
+    "snapshotSeedMismatch": true
+  },
+  "snapshotName": "cloak-t3-state",
   "guests": [
     {
       "name": "cloak-t3-win",
