@@ -326,6 +326,16 @@ jobs:
           Write-Host "=== Generated Executables (.exe) ===";
           Get-ChildItem -Path $binOut -Filter "*.exe" | Select-Object Name, Length;
 
+      - name: Generate build identity manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          $sourceSha = ((Get-Content "source-revision.txt" | Where-Object { $_ -match '^source_sha=' }) -replace '^source_sha=', '').Trim();
+          if (-not $sourceSha) { throw "source_sha not found in source-revision.txt" }
+          & ".\.github\scripts\generate-build-identity.ps1" -BuildMode stock -SourceRevision ([string]$sourceSha) -OutputPath "build-identity.json";
+          if ($LASTEXITCODE -ne 0) { throw "generate-build-identity.ps1 failed: $LASTEXITCODE" }
+
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -339,6 +349,7 @@ jobs:
             Config.kmk
             env.bat
             source-revision.txt
+            build-identity.json
             *.log
             out/**/*.log
 
@@ -924,6 +935,16 @@ jobs:
           & ".\scripts\verify-manifest.ps1" -ManifestPath ".\scripts\testdata\build-identity.cloak.json" -RequireCloak;
           if ($LASTEXITCODE -ne 0) { throw "verify-manifest.ps1 failed: $LASTEXITCODE" }
 
+      - name: Verify generated build identity manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          $sourceSha = ((Get-Content "diagnostics\source-revision.txt" | Where-Object { $_ -match '^source_sha=' }) -replace '^source_sha=', '').Trim();
+          if (-not $sourceSha) { throw "source_sha not found in build diagnostics" }
+          & ".\scripts\verify-manifest.ps1" -ManifestPath ".\diagnostics\build-identity.json" -ExpectedSourceRevision ([string]$sourceSha);
+          if ($LASTEXITCODE -ne 0) { throw "verify-manifest.ps1 failed: $LASTEXITCODE" }
+
       - name: Show which revision was built
         if: always()
         shell: pwsh
@@ -993,6 +1014,7 @@ jobs:
           path: |
             identity-out/
             binary-identity.txt
+            diagnostics/build-identity.json
 
       - name: Summarise identity
         if: always()

@@ -13,3 +13,5 @@
 .vscode
 cloak
 .catdesk
+/build-identity.json
+/source-revision.txt

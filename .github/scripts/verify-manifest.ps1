@@ -34,11 +34,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ChipsetBits = @{
-    'i440fx' = [uint32]1
-    'piix3'  = [uint32]2
-    'ich9'   = [uint32]4
-}
+Import-Module (Join-Path $PSScriptRoot 'CloakManifest.psm1') -Force
+
 $AllowedProperties = @(
     'buildMode', 'firmwareFamily', 'pcBiosVersion', 'ovmfVersion',
     'dsdtHash', 'vgaBiosHash', 'biosRomHash', 'supportedChipsets',
@@ -50,161 +47,6 @@ $Failures = [System.Collections.Generic.List[string]]::new()
 function Add-Failure {
     param([string] $Message)
     $script:Failures.Add($Message)
-}
-
-function Get-StringOrNull {
-    param($Object, [string] $Name)
-    $Property = $Object.PSObject.Properties[$Name]
-    if (-not $Property) {
-        throw "missing property '$Name'"
-    }
-    if ($null -eq $Property.Value) {
-        return $null
-    }
-    if ($Property.Value -isnot [string]) {
-        throw "property '$Name' must be a string or null"
-    }
-    return [string] $Property.Value
-}
-
-function Get-UInt16 {
-    param($Value, [string] $Name)
-    if ($Value -is [string]) {
-        $Text = $Value.Trim()
-        if ($Text -match '^0x([0-9A-Fa-f]{1,4})$') {
-            $Number = [Convert]::ToUInt32($Matches[1], 16)
-        }
-        elseif ($Text -match '^([0-9A-Fa-f]{1,4})$') {
-            $Number = [Convert]::ToUInt32($Matches[1], 16)
-        }
-        else {
-            throw "property '$Name' must be a 16-bit hexadecimal value"
-        }
-    }
-    elseif ($Value -is [byte] -or $Value -is [uint16] -or $Value -is [int] -or
-            $Value -is [uint32] -or $Value -is [long] -or $Value -is [uint64]) {
-        $Number = [uint64] $Value
-    }
-    else {
-        throw "property '$Name' must be a hexadecimal string or integer"
-    }
-    if ($Number -gt [uint64]0xFFFF) {
-        throw "property '$Name' is outside the 16-bit range"
-    }
-    return [uint16] $Number
-}
-
-function Get-UInt16Property {
-    param($Object, [string] $Name)
-    $Property = $Object.PSObject.Properties[$Name]
-    if (-not $Property) {
-        throw "missing property '$Name'"
-    }
-    return Get-UInt16 $Property.Value $Name
-}
-
-function Get-ChipsetMask {
-    param($Value)
-    if ($null -eq $Value) {
-        return [uint32]0
-    }
-    if ($Value -is [byte] -or $Value -is [uint16] -or $Value -is [int] -or
-        $Value -is [uint32] -or $Value -is [long] -or $Value -is [uint64]) {
-        $Mask = [uint64] $Value
-        if ($Mask -gt [uint64]7) {
-            throw 'property supportedChipsets contains unsupported bits'
-        }
-        return [uint32] $Mask
-    }
-    $Mask = [uint32]0
-    foreach ($Entry in @($Value)) {
-        if ($Entry -isnot [string]) {
-            throw 'property supportedChipsets must be an array of names'
-        }
-        foreach ($Part in ($Entry -split ',')) {
-            $Name = $Part.Trim().ToLowerInvariant()
-            if (-not $Name) {
-                throw 'property supportedChipsets contains an empty name'
-            }
-            if (-not $ChipsetBits.ContainsKey($Name)) {
-                throw "unknown chipset '$Name'"
-            }
-            $Mask = $Mask -bor $ChipsetBits[$Name]
-        }
-    }
-    return [uint32] $Mask
-}
-
-function Get-LeUInt16Bytes {
-    param([uint16] $Value)
-    return [byte[]] @(($Value -band 0xFF), (($Value -shr 8) -band 0xFF))
-}
-
-function Get-LeUInt32Bytes {
-    param([uint32] $Value)
-    return [byte[]] @(
-        ($Value -band 0xFF),
-        (($Value -shr 8) -band 0xFF),
-        (($Value -shr 16) -band 0xFF),
-        (($Value -shr 24) -band 0xFF)
-    )
-}
-
-function Add-HashString {
-    param(
-        [System.Collections.Generic.List[byte]] $Bytes,
-        $Value
-    )
-    if ($null -eq $Value) {
-        $Bytes.AddRange([byte[]] (Get-LeUInt32Bytes ([uint32]::MaxValue)))
-        return
-    }
-    $Text = [string] $Value
-    $Encoded = [System.Text.Encoding]::UTF8.GetBytes($Text)
-    $Bytes.AddRange([byte[]] (Get-LeUInt32Bytes ([uint32] $Encoded.Length)))
-    $Bytes.AddRange($Encoded)
-}
-
-function Get-BuildHash {
-    param(
-        $BuildMode,
-        $FirmwareFamily,
-        $PcBiosVersion,
-        $OvmfVersion,
-        $DsdtHash,
-        $VgaBiosHash,
-        $BiosRomHash,
-        [uint32] $ChipsetMask,
-        [uint16] $VmmDevVendorId,
-        [uint16] $VmmDevDeviceId,
-        [uint16] $VgaVendorId,
-        [uint16] $VgaDeviceId,
-        [uint16] $VirtioVendorId,
-        $SourceRevision
-    )
-    $Bytes = [System.Collections.Generic.List[byte]]::new()
-    $Bytes.AddRange([System.Text.Encoding]::ASCII.GetBytes('VBoxCloakBuildManifestBuildHashV1'))
-    Add-HashString $Bytes $BuildMode
-    Add-HashString $Bytes $FirmwareFamily
-    Add-HashString $Bytes $PcBiosVersion
-    Add-HashString $Bytes $OvmfVersion
-    Add-HashString $Bytes $DsdtHash
-    Add-HashString $Bytes $VgaBiosHash
-    Add-HashString $Bytes $BiosRomHash
-    $Bytes.AddRange([byte[]] (Get-LeUInt32Bytes $ChipsetMask))
-    foreach ($Binding in @($VmmDevVendorId, $VmmDevDeviceId, $VgaVendorId, $VgaDeviceId, $VirtioVendorId)) {
-        $Bytes.AddRange([byte[]] (Get-LeUInt16Bytes $Binding))
-    }
-    Add-HashString $Bytes $SourceRevision
-
-    $Sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $Digest = $Sha.ComputeHash($Bytes.ToArray())
-    }
-    finally {
-        $Sha.Dispose()
-    }
-    return ([BitConverter]::ToString($Digest) -replace '-', '').ToUpperInvariant()
 }
 
 $ResolvedPath = $ManifestPath
@@ -221,27 +63,27 @@ try {
         }
     }
 
-    $BuildMode = Get-StringOrNull $Json 'buildMode'
-    $FirmwareFamily = Get-StringOrNull $Json 'firmwareFamily'
-    $PcBiosVersion = Get-StringOrNull $Json 'pcBiosVersion'
-    $OvmfVersion = Get-StringOrNull $Json 'ovmfVersion'
-    $DsdtHash = Get-StringOrNull $Json 'dsdtHash'
-    $VgaBiosHash = Get-StringOrNull $Json 'vgaBiosHash'
-    $BiosRomHash = Get-StringOrNull $Json 'biosRomHash'
-    $SourceRevision = Get-StringOrNull $Json 'sourceRevision'
-    $BuildHash = Get-StringOrNull $Json 'buildHash'
+    $BuildMode = Get-CloakStringOrNull $Json 'buildMode'
+    $FirmwareFamily = Get-CloakStringOrNull $Json 'firmwareFamily'
+    $PcBiosVersion = Get-CloakStringOrNull $Json 'pcBiosVersion'
+    $OvmfVersion = Get-CloakStringOrNull $Json 'ovmfVersion'
+    $DsdtHash = Get-CloakStringOrNull $Json 'dsdtHash'
+    $VgaBiosHash = Get-CloakStringOrNull $Json 'vgaBiosHash'
+    $BiosRomHash = Get-CloakStringOrNull $Json 'biosRomHash'
+    $SourceRevision = Get-CloakStringOrNull $Json 'sourceRevision'
+    $BuildHash = Get-CloakStringOrNull $Json 'buildHash'
 
     $ChipsetProperty = $Json.PSObject.Properties['supportedChipsets']
     if (-not $ChipsetProperty) {
         throw "missing property 'supportedChipsets'"
     }
-    $ChipsetMask = Get-ChipsetMask $ChipsetProperty.Value
+    $ChipsetMask = Get-CloakChipsetMask $ChipsetProperty.Value
 
-    $VmmDevVendorId = Get-UInt16Property $Json 'vmmDevVendorId'
-    $VmmDevDeviceId = Get-UInt16Property $Json 'vmmDevDeviceId'
-    $VgaVendorId = Get-UInt16Property $Json 'vgaVendorId'
-    $VgaDeviceId = Get-UInt16Property $Json 'vgaDeviceId'
-    $VirtioVendorId = Get-UInt16Property $Json 'virtioVendorId'
+    $VmmDevVendorId = Get-CloakUInt16Property $Json 'vmmDevVendorId'
+    $VmmDevDeviceId = Get-CloakUInt16Property $Json 'vmmDevDeviceId'
+    $VgaVendorId = Get-CloakUInt16Property $Json 'vgaVendorId'
+    $VgaDeviceId = Get-CloakUInt16Property $Json 'vgaDeviceId'
+    $VirtioVendorId = Get-CloakUInt16Property $Json 'virtioVendorId'
 
     if ($BuildMode -notin @('stock', 'cloak')) {
         Add-Failure "buildMode must be 'stock' or 'cloak'"
@@ -292,13 +134,13 @@ try {
         }
     }
     if ($ExpectedChipsets) {
-        $ExpectedMask = Get-ChipsetMask $ExpectedChipsets
+        $ExpectedMask = Get-CloakChipsetMask $ExpectedChipsets
         if ($ChipsetMask -ne $ExpectedMask) {
             Add-Failure "supportedChipsets mismatch: expected mask $ExpectedMask, got $ChipsetMask"
         }
     }
 
-    $ComputedHash = Get-BuildHash `
+    $ComputedHash = Get-CloakBuildHash `
         -BuildMode $BuildMode `
         -FirmwareFamily $FirmwareFamily `
         -PcBiosVersion $PcBiosVersion `
