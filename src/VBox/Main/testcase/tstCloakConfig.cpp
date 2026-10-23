@@ -646,6 +646,167 @@ static void testManifestHashAndStateIdentity(RTTEST hTest)
     RTTESTI_CHECK_RC(CloakCompareStateIdentity(NULL, &Current), VERR_INVALID_PARAMETER);
 }
 
+typedef struct TESTIDENTITYSTREAM
+{
+    uint8_t abData[1024];
+    size_t  cbData;
+    size_t  off;
+} TESTIDENTITYSTREAM;
+
+static int testIdentityStreamPutU32(void *pvUser, uint32_t u32Value)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    if (pStream->cbData + sizeof(u32Value) > sizeof(pStream->abData))
+        return VERR_BUFFER_OVERFLOW;
+    memcpy(&pStream->abData[pStream->cbData], &u32Value, sizeof(u32Value));
+    pStream->cbData += sizeof(u32Value);
+    return VINF_SUCCESS;
+}
+
+static int testIdentityStreamPutBool(void *pvUser, bool fValue)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    if (pStream->cbData + 1 > sizeof(pStream->abData))
+        return VERR_BUFFER_OVERFLOW;
+    pStream->abData[pStream->cbData++] = fValue ? 1 : 0;
+    return VINF_SUCCESS;
+}
+
+static int testIdentityStreamPutStrZ(void *pvUser, const char *pszValue)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    size_t cchValue = strlen(pszValue) + 1;
+    if (pStream->cbData + cchValue > sizeof(pStream->abData))
+        return VERR_BUFFER_OVERFLOW;
+    memcpy(&pStream->abData[pStream->cbData], pszValue, cchValue);
+    pStream->cbData += cchValue;
+    return VINF_SUCCESS;
+}
+
+static int testIdentityStreamGetU32(void *pvUser, uint32_t *pu32Value)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    if (pStream->off + sizeof(*pu32Value) > pStream->cbData)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    memcpy(pu32Value, &pStream->abData[pStream->off], sizeof(*pu32Value));
+    pStream->off += sizeof(*pu32Value);
+    return VINF_SUCCESS;
+}
+
+static int testIdentityStreamGetBool(void *pvUser, bool *pfValue)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    if (pStream->off + 1 > pStream->cbData)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    *pfValue = pStream->abData[pStream->off++] != 0;
+    return VINF_SUCCESS;
+}
+
+static int testIdentityStreamGetStrZ(void *pvUser, char *pszValue, size_t cchValue)
+{
+    TESTIDENTITYSTREAM *pStream = (TESTIDENTITYSTREAM *)pvUser;
+    size_t cch = 0;
+    while (   cch < cchValue
+           && pStream->off + cch < pStream->cbData
+           && pStream->abData[pStream->off + cch] != '\0')
+        cch++;
+    if (cch >= cchValue || pStream->off + cch >= pStream->cbData)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    memcpy(pszValue, &pStream->abData[pStream->off], cch + 1);
+    pStream->off += cch + 1;
+    return VINF_SUCCESS;
+}
+
+static CLOAKSTATEIDENTITYSTREAM testIdentityStreamCreate(TESTIDENTITYSTREAM *pStream)
+{
+    CLOAKSTATEIDENTITYSTREAM Stream;
+    Stream.pfnPutU32 = testIdentityStreamPutU32;
+    Stream.pfnPutBool = testIdentityStreamPutBool;
+    Stream.pfnPutStrZ = testIdentityStreamPutStrZ;
+    Stream.pfnGetU32 = testIdentityStreamGetU32;
+    Stream.pfnGetBool = testIdentityStreamGetBool;
+    Stream.pfnGetStrZ = testIdentityStreamGetStrZ;
+    Stream.pvUser = pStream;
+    return Stream;
+}
+
+static void testStateIdentitySerialization(RTTEST hTest)
+{
+    RTTestSub(hTest, "Saved-state identity serialization");
+
+    char szHashA[CLOAK_SEED_HEX_SIZE + 1];
+    char szHashB[CLOAK_SEED_HEX_SIZE + 1];
+    memset(szHashA, 'A', CLOAK_SEED_HEX_SIZE);
+    memset(szHashB, 'B', CLOAK_SEED_HEX_SIZE);
+    szHashA[CLOAK_SEED_HEX_SIZE] = '\0';
+    szHashB[CLOAK_SEED_HEX_SIZE] = '\0';
+
+    CLOAKSTATEIDENTITY Identity = {};
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Identity, true, "profile-a", szHashA, szHashB), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityIsValid(&Identity));
+
+    TESTIDENTITYSTREAM TestStream = {};
+    CLOAKSTATEIDENTITYSTREAM Stream = testIdentityStreamCreate(&TestStream);
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(&Identity, &Stream), VINF_SUCCESS);
+    RTTESTI_CHECK(TestStream.cbData > 0);
+
+    TestStream.off = 0;
+    CLOAKSTATEIDENTITY Loaded = {};
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &Stream), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityEquals(&Identity, &Loaded));
+    RTTESTI_CHECK(TestStream.off == TestStream.cbData);
+
+    TESTIDENTITYSTREAM DisabledStream = {};
+    Stream = testIdentityStreamCreate(&DisabledStream);
+    CLOAKSTATEIDENTITY Disabled = {};
+    RTTESTI_CHECK_RC(CloakStateIdentitySet(&Disabled, false, NULL, NULL, NULL), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityIsValid(&Disabled));
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(&Disabled, &Stream), VINF_SUCCESS);
+    DisabledStream.off = 0;
+    Loaded = {};
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &Stream), VINF_SUCCESS);
+    RTTESTI_CHECK(CloakStateIdentityEquals(&Disabled, &Loaded));
+    RTTESTI_CHECK(Loaded.fEnabled == false);
+    RTTESTI_CHECK(DisabledStream.off == DisabledStream.cbData);
+
+    size_t cbIdentity = TestStream.cbData;
+    TestStream.abData[0] ^= 0xff;
+    TestStream.off = 0;
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &Stream), VERR_SSM_DATA_UNIT_FORMAT_CHANGED);
+
+    TestStream.abData[0] ^= 0xff;
+    TestStream.cbData = 3;
+    TestStream.off = 0;
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &Stream), VERR_SSM_DATA_UNIT_FORMAT_CHANGED);
+
+    TestStream.cbData = cbIdentity;
+    TestStream.abData[sizeof(uint32_t)] = 0;
+    TestStream.off = 0;
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &Stream), VERR_SSM_DATA_UNIT_FORMAT_CHANGED);
+
+    CLOAKSTATEIDENTITY Invalid = {};
+    Invalid.fEnabled = true;
+    RTTESTI_CHECK_RC(RTStrCopy(Invalid.szProfileId, sizeof(Invalid.szProfileId), "profile-a"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(RTStrCopy(Invalid.szSeedHash, sizeof(Invalid.szSeedHash), "short"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(RTStrCopy(Invalid.szManifestHash, sizeof(Invalid.szManifestHash), szHashA), VINF_SUCCESS);
+    RTTESTI_CHECK(!CloakStateIdentityIsValid(&Invalid));
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(&Invalid, &Stream), VERR_INVALID_PARAMETER);
+
+    CLOAKSTATEIDENTITY DisabledGarbage = {};
+    RTTESTI_CHECK_RC(RTStrCopy(DisabledGarbage.szProfileId,
+                               sizeof(DisabledGarbage.szProfileId), "profile-a"), VINF_SUCCESS);
+    RTTESTI_CHECK(!CloakStateIdentityIsValid(&DisabledGarbage));
+
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(NULL, &Stream), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(&Identity, NULL), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(NULL, &Stream), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, NULL), VERR_INVALID_PARAMETER);
+
+    CLOAKSTATEIDENTITYSTREAM EmptyStream = {};
+    RTTESTI_CHECK_RC(CloakStateIdentitySerialize(&Identity, &EmptyStream), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStateIdentityDeserialize(&Loaded, &EmptyStream), VERR_INVALID_PARAMETER);
+}
+
 static void testSeedHash(RTTEST hTest)
 {
     RTTestSub(hTest, "Seed hash");
@@ -897,6 +1058,7 @@ int main()
         testManifestValidation(hTest);
         testProductionRegistry(hTest);
         testManifestHashAndStateIdentity(hTest);
+        testStateIdentitySerialization(hTest);
         testSeedHash(hTest);
         testChassisType(hTest);
         testProfileMaterializationFields(hTest);

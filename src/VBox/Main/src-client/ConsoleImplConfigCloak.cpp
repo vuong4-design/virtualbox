@@ -36,8 +36,6 @@
 #include <VBox/err.h>
 #include <VBox/vmm/vmmr3vtable.h>
 
-#define CLOAK_SAVED_STATE_IDENTITY_MAGIC    UINT32_C(0x314b4c43)
-
 static const MACHINEPROFILE *cloakGetTestProfile(void)
 {
     static const MACHINEPROFILE s_Profile = []() -> MACHINEPROFILE
@@ -448,28 +446,59 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
     return VINF_SUCCESS;
 }
 
-static int cloakSsmPutString(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, const char *pszValue)
+typedef struct CLOAKSSMSTREAMCTX
 {
-    const char *pszSafe = pszValue ? pszValue : "";
-    size_t cchValue = strlen(pszSafe);
-    if (cchValue >= UINT32_MAX)
-        return VERR_INVALID_PARAMETER;
+    PSSMHANDLE      pSSM;
+    PCVMMR3VTABLE   pVMM;
+} CLOAKSSMSTREAMCTX;
 
-    int vrc = pVMM->pfnSSMR3PutU32(pSSM, (uint32_t)cchValue + 1);
-    if (RT_SUCCESS(vrc))
-        vrc = pVMM->pfnSSMR3PutStrZ(pSSM, pszSafe);
-    return vrc;
+static int cloakSsmStreamPutU32(void *pvUser, uint32_t u32Value)
+{
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3PutU32(pCtx->pSSM, u32Value);
 }
 
-static int cloakSsmGetString(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM, char *pszValue, size_t cchValue)
+static int cloakSsmStreamPutBool(void *pvUser, bool fValue)
 {
-    uint32_t cbValue = 0;
-    int vrc = pVMM->pfnSSMR3GetU32(pSSM, &cbValue);
-    if (RT_FAILURE(vrc))
-        return vrc;
-    if (cbValue == 0 || cbValue > cchValue)
-        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
-    return pVMM->pfnSSMR3GetStrZ(pSSM, pszValue, cbValue);
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3PutBool(pCtx->pSSM, fValue);
+}
+
+static int cloakSsmStreamPutStrZ(void *pvUser, const char *pszValue)
+{
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3PutStrZ(pCtx->pSSM, pszValue);
+}
+
+static int cloakSsmStreamGetU32(void *pvUser, uint32_t *pu32Value)
+{
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3GetU32(pCtx->pSSM, pu32Value);
+}
+
+static int cloakSsmStreamGetBool(void *pvUser, bool *pfValue)
+{
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3GetBool(pCtx->pSSM, pfValue);
+}
+
+static int cloakSsmStreamGetStrZ(void *pvUser, char *pszValue, size_t cchValue)
+{
+    CLOAKSSMSTREAMCTX *pCtx = static_cast<CLOAKSSMSTREAMCTX *>(pvUser);
+    return pCtx->pVMM->pfnSSMR3GetStrZ(pCtx->pSSM, pszValue, cchValue);
+}
+
+static CLOAKSTATEIDENTITYSTREAM cloakCreateSsmStream(CLOAKSSMSTREAMCTX *pCtx)
+{
+    CLOAKSTATEIDENTITYSTREAM Stream;
+    Stream.pfnPutU32 = cloakSsmStreamPutU32;
+    Stream.pfnPutBool = cloakSsmStreamPutBool;
+    Stream.pfnPutStrZ = cloakSsmStreamPutStrZ;
+    Stream.pfnGetU32 = cloakSsmStreamGetU32;
+    Stream.pfnGetBool = cloakSsmStreamGetBool;
+    Stream.pfnGetStrZ = cloakSsmStreamGetStrZ;
+    Stream.pvUser = pCtx;
+    return Stream;
 }
 
 int Console::i_cloakSaveStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
@@ -478,20 +507,17 @@ int Console::i_cloakSaveStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
     AssertPtrReturn(pVMM, VERR_INVALID_POINTER);
 
     bool fEnabled = mfCloakCurrentStateIdentityValid && mfCloakCurrentStateEnabled;
-    const char *pszProfileId = fEnabled ? mStrCloakCurrentStateProfileId.c_str() : "";
-    const char *pszSeedHash = fEnabled ? mStrCloakCurrentStateSeedHash.c_str() : "";
-    const char *pszManifestHash = fEnabled ? mStrCloakCurrentStateManifestHash.c_str() : "";
+    CLOAKSTATEIDENTITY Identity = {};
+    int vrc = CloakStateIdentitySet(&Identity, fEnabled,
+                                    fEnabled ? mStrCloakCurrentStateProfileId.c_str() : "",
+                                    fEnabled ? mStrCloakCurrentStateSeedHash.c_str() : "",
+                                    fEnabled ? mStrCloakCurrentStateManifestHash.c_str() : "");
+    if (RT_FAILURE(vrc))
+        return vrc;
 
-    int vrc = pVMM->pfnSSMR3PutU32(pSSM, CLOAK_SAVED_STATE_IDENTITY_MAGIC);
-    if (RT_SUCCESS(vrc))
-        vrc = pVMM->pfnSSMR3PutBool(pSSM, fEnabled);
-    if (RT_SUCCESS(vrc))
-        vrc = cloakSsmPutString(pSSM, pVMM, pszProfileId);
-    if (RT_SUCCESS(vrc))
-        vrc = cloakSsmPutString(pSSM, pVMM, pszSeedHash);
-    if (RT_SUCCESS(vrc))
-        vrc = cloakSsmPutString(pSSM, pVMM, pszManifestHash);
-    return vrc;
+    CLOAKSSMSTREAMCTX Ctx = { pSSM, pVMM };
+    CLOAKSTATEIDENTITYSTREAM Stream = cloakCreateSsmStream(&Ctx);
+    return CloakStateIdentitySerialize(&Identity, &Stream);
 }
 
 int Console::i_cloakLoadStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
@@ -499,38 +525,14 @@ int Console::i_cloakLoadStateIdentity(PSSMHANDLE pSSM, PCVMMR3VTABLE pVMM)
     AssertPtrReturn(pSSM, VERR_INVALID_POINTER);
     AssertPtrReturn(pVMM, VERR_INVALID_POINTER);
 
-    uint32_t uMagic = 0;
-    int vrc = pVMM->pfnSSMR3GetU32(pSSM, &uMagic);
-    if (RT_FAILURE(vrc))
-        return vrc;
-    if (uMagic != CLOAK_SAVED_STATE_IDENTITY_MAGIC)
-        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
-
-    bool fEnabled = false;
-    vrc = pVMM->pfnSSMR3GetBool(pSSM, &fEnabled);
-    if (RT_FAILURE(vrc))
-        return vrc;
-
-    char szProfileId[CLOAK_PROFILE_ID_MAX] = "";
-    char szSeedHash[CLOAK_SEED_HEX_SIZE + 1] = "";
-    char szManifestHash[CLOAK_SEED_HEX_SIZE + 1] = "";
-    vrc = cloakSsmGetString(pSSM, pVMM, szProfileId, sizeof(szProfileId));
-    if (RT_SUCCESS(vrc))
-        vrc = cloakSsmGetString(pSSM, pVMM, szSeedHash, sizeof(szSeedHash));
-    if (RT_SUCCESS(vrc))
-        vrc = cloakSsmGetString(pSSM, pVMM, szManifestHash, sizeof(szManifestHash));
-    if (RT_FAILURE(vrc))
-        return vrc;
-
-    if (!fEnabled && (szProfileId[0] || szSeedHash[0] || szManifestHash[0]))
-        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
-
+    CLOAKSSMSTREAMCTX Ctx = { pSSM, pVMM };
+    CLOAKSTATEIDENTITYSTREAM Stream = cloakCreateSsmStream(&Ctx);
     CLOAKSTATEIDENTITY Identity = {};
-    vrc = CloakStateIdentitySet(&Identity, fEnabled, szProfileId, szSeedHash, szManifestHash);
+    int vrc = CloakStateIdentityDeserialize(&Identity, &Stream);
     if (RT_FAILURE(vrc))
-        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+        return vrc;
 
-    mfCloakSavedStateEnabled = fEnabled;
+    mfCloakSavedStateEnabled = Identity.fEnabled;
     mStrCloakSavedStateProfileId = Identity.szProfileId;
     mStrCloakSavedStateSeedHash = Identity.szSeedHash;
     mStrCloakSavedStateManifestHash = Identity.szManifestHash;

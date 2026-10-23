@@ -40,6 +40,8 @@
 #include <iprt/types.h>
 #include <iprt/uuid.h>
 
+#include <VBox/err.h>
+
 #include <string.h>
 
 #define CLOAK_SEED_SIZE                 32U
@@ -55,6 +57,21 @@ typedef struct CLOAKSTATEIDENTITY
 } CLOAKSTATEIDENTITY;
 typedef CLOAKSTATEIDENTITY *PCLOAKSTATEIDENTITY;
 typedef const CLOAKSTATEIDENTITY *PCCLOAKSTATEIDENTITY;
+
+#define CLOAK_SAVED_STATE_IDENTITY_MAGIC    UINT32_C(0x314b4c43)
+
+typedef struct CLOAKSTATEIDENTITYSTREAM
+{
+    int (*pfnPutU32)(void *pvUser, uint32_t u32Value);
+    int (*pfnPutBool)(void *pvUser, bool fValue);
+    int (*pfnPutStrZ)(void *pvUser, const char *pszValue);
+    int (*pfnGetU32)(void *pvUser, uint32_t *pu32Value);
+    int (*pfnGetBool)(void *pvUser, bool *pfValue);
+    int (*pfnGetStrZ)(void *pvUser, char *pszValue, size_t cchValue);
+    void *pvUser;
+} CLOAKSTATEIDENTITYSTREAM;
+typedef CLOAKSTATEIDENTITYSTREAM *PCLOAKSTATEIDENTITYSTREAM;
+typedef const CLOAKSTATEIDENTITYSTREAM *PCCLOAKSTATEIDENTITYSTREAM;
 
 AssertCompile(CLOAK_SEED_SIZE == RTSHA256_HASH_SIZE);
 AssertCompile(CLOAK_SEED_HEX_SIZE == RTSHA256_DIGEST_LEN);
@@ -530,6 +547,111 @@ DECLINLINE(int) CloakCompareStateIdentity(PCCLOAKSTATEIDENTITY pSaved, PCCLOAKST
     if (!pSaved || !pCurrent)
         return VERR_INVALID_PARAMETER;
     return CloakStateIdentityEquals(pSaved, pCurrent) ? VINF_SUCCESS : VERR_MISMATCH;
+}
+
+DECLINLINE(bool) CloakStateIdentityIsValid(PCCLOAKSTATEIDENTITY pIdentity)
+{
+    if (!pIdentity)
+        return false;
+    if (!pIdentity->fEnabled)
+        return    !pIdentity->szProfileId[0]
+               && !pIdentity->szSeedHash[0]
+               && !pIdentity->szManifestHash[0];
+
+    size_t cchProfileId = RTStrNLen(pIdentity->szProfileId, sizeof(pIdentity->szProfileId));
+    size_t cchSeedHash = RTStrNLen(pIdentity->szSeedHash, sizeof(pIdentity->szSeedHash));
+    size_t cchManifestHash = RTStrNLen(pIdentity->szManifestHash, sizeof(pIdentity->szManifestHash));
+    return    cchProfileId > 0
+           && cchProfileId < sizeof(pIdentity->szProfileId)
+           && cchSeedHash == CLOAK_SEED_HEX_SIZE
+           && cchManifestHash == CLOAK_SEED_HEX_SIZE;
+}
+
+DECLINLINE(int) CloakStateIdentityPutString(PCCLOAKSTATEIDENTITYSTREAM pStream, const char *pszValue)
+{
+    size_t cchValue = strlen(pszValue);
+    if (cchValue >= UINT32_MAX)
+        return VERR_INVALID_PARAMETER;
+
+    int vrc = pStream->pfnPutU32(pStream->pvUser, (uint32_t)cchValue + 1);
+    if (RT_SUCCESS(vrc))
+        vrc = pStream->pfnPutStrZ(pStream->pvUser, pszValue);
+    return vrc;
+}
+
+DECLINLINE(int) CloakStateIdentityGetString(PCCLOAKSTATEIDENTITYSTREAM pStream, char *pszValue, size_t cchValue)
+{
+    uint32_t cbValue = 0;
+    int vrc = pStream->pfnGetU32(pStream->pvUser, &cbValue);
+    if (RT_FAILURE(vrc))
+        return vrc;
+    if (cbValue == 0 || cbValue > cchValue)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+    return pStream->pfnGetStrZ(pStream->pvUser, pszValue, cbValue);
+}
+
+DECLINLINE(int) CloakStateIdentitySerialize(PCCLOAKSTATEIDENTITY pIdentity,
+                                            PCCLOAKSTATEIDENTITYSTREAM pStream)
+{
+    if (   !pIdentity || !pStream
+        || !pStream->pfnPutU32 || !pStream->pfnPutBool || !pStream->pfnPutStrZ)
+        return VERR_INVALID_PARAMETER;
+    if (!CloakStateIdentityIsValid(pIdentity))
+        return VERR_INVALID_PARAMETER;
+
+    const char *pszProfileId = pIdentity->fEnabled ? pIdentity->szProfileId : "";
+    const char *pszSeedHash = pIdentity->fEnabled ? pIdentity->szSeedHash : "";
+    const char *pszManifestHash = pIdentity->fEnabled ? pIdentity->szManifestHash : "";
+
+    int vrc = pStream->pfnPutU32(pStream->pvUser, CLOAK_SAVED_STATE_IDENTITY_MAGIC);
+    if (RT_SUCCESS(vrc))
+        vrc = pStream->pfnPutBool(pStream->pvUser, pIdentity->fEnabled);
+    if (RT_SUCCESS(vrc))
+        vrc = CloakStateIdentityPutString(pStream, pszProfileId);
+    if (RT_SUCCESS(vrc))
+        vrc = CloakStateIdentityPutString(pStream, pszSeedHash);
+    if (RT_SUCCESS(vrc))
+        vrc = CloakStateIdentityPutString(pStream, pszManifestHash);
+    return vrc;
+}
+
+DECLINLINE(int) CloakStateIdentityDeserialize(PCLOAKSTATEIDENTITY pIdentity,
+                                              PCCLOAKSTATEIDENTITYSTREAM pStream)
+{
+    if (   !pIdentity || !pStream
+        || !pStream->pfnGetU32 || !pStream->pfnGetBool || !pStream->pfnGetStrZ)
+        return VERR_INVALID_PARAMETER;
+
+    CloakStateIdentityInit(pIdentity);
+
+    uint32_t uMagic = 0;
+    int vrc = pStream->pfnGetU32(pStream->pvUser, &uMagic);
+    if (RT_FAILURE(vrc))
+        return vrc;
+    if (uMagic != CLOAK_SAVED_STATE_IDENTITY_MAGIC)
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+
+    bool fEnabled = false;
+    vrc = pStream->pfnGetBool(pStream->pvUser, &fEnabled);
+    if (RT_FAILURE(vrc))
+        return vrc;
+
+    char szProfileId[CLOAK_PROFILE_ID_MAX] = "";
+    char szSeedHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    char szManifestHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    vrc = CloakStateIdentityGetString(pStream, szProfileId, sizeof(szProfileId));
+    if (RT_SUCCESS(vrc))
+        vrc = CloakStateIdentityGetString(pStream, szSeedHash, sizeof(szSeedHash));
+    if (RT_SUCCESS(vrc))
+        vrc = CloakStateIdentityGetString(pStream, szManifestHash, sizeof(szManifestHash));
+    if (RT_FAILURE(vrc))
+        return vrc;
+
+    if (!fEnabled && (szProfileId[0] || szSeedHash[0] || szManifestHash[0]))
+        return VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
+
+    vrc = CloakStateIdentitySet(pIdentity, fEnabled, szProfileId, szSeedHash, szManifestHash);
+    return RT_SUCCESS(vrc) ? VINF_SUCCESS : VERR_SSM_DATA_UNIT_FORMAT_CHANGED;
 }
 
 DECLINLINE(void) CloakManifestHashString(RTSHA256CONTEXT *pCtx, const char *pszValue)
