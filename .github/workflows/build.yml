@@ -916,6 +916,14 @@ jobs:
           name: cloak-ci-scripts
           path: scripts
 
+      - name: Verify manifest verifier fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\verify-manifest.ps1" -ManifestPath ".\scripts\testdata\build-identity.cloak.json" -RequireCloak;
+          if ($LASTEXITCODE -ne 0) { throw "verify-manifest.ps1 failed: $LASTEXITCODE" }
+
       - name: Show which revision was built
         if: always()
         shell: pwsh

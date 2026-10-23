@@ -1,0 +1,17 @@
+{
+  "buildMode": "cloak",
+  "firmwareFamily": "ami",
+  "pcBiosVersion": "1.0",
+  "ovmfVersion": null,
+  "dsdtHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "vgaBiosHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "biosRomHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "supportedChipsets": ["i440fx", "piix3", "ich9"],
+  "vmmDevVendorId": "80EE",
+  "vmmDevDeviceId": "CAFE",
+  "vgaVendorId": "80EE",
+  "vgaDeviceId": "BEEF",
+  "virtioVendorId": "1AF4",
+  "sourceRevision": "0123456789abcdef0123456789abcdef01234567",
+  "buildHash": "FC03B2E69D912989C87289C8CC8A48A39F8B991894203ACA56706F87E297FDC5"
+}

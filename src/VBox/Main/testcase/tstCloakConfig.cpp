@@ -373,6 +373,13 @@ static void testSeedStreams(RTTEST hTest)
                                       &u64ProfileB, &u64SerialB, &u64JitterB), VERR_INVALID_PARAMETER);
 }
 
+static void setValidBuildHash(CLOAKBUILDMANIFEST *pManifest, char *pszHash, size_t cchHash)
+{
+    pManifest->pszBuildHash = NULL;
+    RTTESTI_CHECK_RC(CloakBuildHashHex(pManifest, pszHash, cchHash), VINF_SUCCESS);
+    pManifest->pszBuildHash = pszHash;
+}
+
 static void testBuildManifestValidation(RTTEST hTest)
 {
     RTTestSub(hTest, "Build manifest contract");
@@ -390,9 +397,31 @@ static void testBuildManifestValidation(RTTEST hTest)
     Manifest.pszVgaBiosHash = "sha256:vga";
     Manifest.pszBiosRomHash = "sha256:bios";
     Manifest.pszSourceRevision = "abcdef0";
-    Manifest.pszBuildHash = "sha256:build";
+    char szBuildHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    setValidBuildHash(&Manifest, szBuildHash, sizeof(szBuildHash));
 
     RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Manifest), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakValidateBuildManifestHash(&Manifest), VINF_SUCCESS);
+
+    char szHashA[CLOAK_SEED_HEX_SIZE + 1] = "";
+    char szHashB[CLOAK_SEED_HEX_SIZE + 1] = "";
+    RTTESTI_CHECK_RC(CloakBuildHashHex(&Manifest, szHashA, sizeof(szHashA)), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakBuildHashHex(&Manifest, szHashB, sizeof(szHashB)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szHashA, szHashB));
+    RTTESTI_CHECK(strlen(szHashA) == CLOAK_SEED_HEX_SIZE);
+    RTTESTI_CHECK(!RTStrICmp(szHashA, "F62C060EEA27D2FFB22BE2E6212D8C22E6EC93545CD9F87C1DD39C3C9F15D9E7"));
+    RTTESTI_CHECK(!RTStrICmp(szHashA, Manifest.pszBuildHash));
+
+    CLOAKBUILDMANIFEST Changed = Manifest;
+    Changed.pszSourceRevision = "abcdef1";
+    RTTESTI_CHECK_RC(CloakBuildHashHex(&Changed, szHashB, sizeof(szHashB)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szHashA, szHashB));
+    Changed.pszBuildHash = szHashB;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifestHash(&Changed), VINF_SUCCESS);
+
+    char szBadHash[CLOAK_SEED_HEX_SIZE + 1];
+    memset(szBadHash, '0', CLOAK_SEED_HEX_SIZE);
+    szBadHash[CLOAK_SEED_HEX_SIZE] = '\0';
 
     CLOAKBUILDMANIFEST Bad = Manifest;
     Bad.pszBuildMode = "stock";
@@ -434,6 +463,19 @@ static void testBuildManifestValidation(RTTEST hTest)
     Bad.pszBuildHash = NULL;
     RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
 
+    Bad = Manifest;
+    Bad.pszBuildHash = szBadHash;
+    RTTESTI_CHECK_RC(CloakValidateBuildManifest(&Bad), VERR_NOT_SUPPORTED);
+
+    Bad = Manifest;
+    Bad.pszBuildHash = "short";
+    RTTESTI_CHECK_RC(CloakValidateBuildManifestHash(&Bad), VERR_NOT_SUPPORTED);
+
+    RTTESTI_CHECK_RC(CloakBuildHashHex(NULL, szHashB, sizeof(szHashB)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakBuildHashHex(&Manifest, NULL, sizeof(szHashB)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakBuildHashHex(&Manifest, szHashB, CLOAK_SEED_HEX_SIZE), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakValidateBuildManifestHash(NULL), VERR_NOT_SUPPORTED);
+
     RTTESTI_CHECK_RC(CloakValidateBuildManifest(NULL), VERR_INVALID_PARAMETER);
 }
 
@@ -465,7 +507,8 @@ static void testManifestValidation(RTTEST hTest)
     Manifest.pszVgaBiosHash = "sha256:vga";
     Manifest.pszBiosRomHash = "sha256:bios";
     Manifest.pszSourceRevision = "abcdef0";
-    Manifest.pszBuildHash = "sha256:build";
+    char szBuildHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    setValidBuildHash(&Manifest, szBuildHash, sizeof(szBuildHash));
 
     RTTESTI_CHECK_RC(CloakValidateProfileAgainstManifest(&Profile, &Manifest), VINF_SUCCESS);
 
@@ -541,7 +584,8 @@ static void testProductionRegistry(RTTEST hTest)
     Manifest.pszVgaBiosHash = "sha256:vga";
     Manifest.pszBiosRomHash = "sha256:bios";
     Manifest.pszSourceRevision = "abcdef0";
-    Manifest.pszBuildHash = "sha256:build";
+    char szBuildHash[CLOAK_SEED_HEX_SIZE + 1] = "";
+    setValidBuildHash(&Manifest, szBuildHash, sizeof(szBuildHash));
 
     const MACHINEPROFILE *apProfiles[] = { &Profile, NULL };
     RTTESTI_CHECK_RC(CloakValidateProductionRegistry(apProfiles, RT_ELEMENTS(apProfiles), &Manifest), VINF_SUCCESS);
