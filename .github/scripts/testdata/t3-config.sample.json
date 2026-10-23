@@ -1,0 +1,33 @@
+{
+  "runs": 3,
+  "bootTimeoutSeconds": 180,
+  "captureDelaySeconds": 20,
+  "guests": [
+    {
+      "name": "cloak-t3-win",
+      "platform": "windows",
+      "guestOutputPath": "C:\\t3\\guest-identity.json",
+      "waitSeconds": 300,
+      "fetchCommand": [
+        "{vboxmanage}", "guestcontrol", "{name}",
+        "copyfrom",
+        "--username", "t3",
+        "--password", "{password}",
+        "{guestOutputPath}", "{localPath}"
+      ]
+    },
+    {
+      "name": "cloak-t3-linux",
+      "platform": "linux",
+      "guestOutputPath": "/tmp/t3/guest-identity.json",
+      "waitSeconds": 300,
+      "fetchCommand": [
+        "{vboxmanage}", "guestcontrol", "{name}",
+        "copyfrom",
+        "--username", "t3",
+        "--password", "{password}",
+        "{guestOutputPath}", "{localPath}"
+      ]
+    }
+  ]
+}

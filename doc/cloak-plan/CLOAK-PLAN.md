@@ -979,7 +979,7 @@ Quy tắc:
 - T3 phải có ít nhất **1 guest Windows + 1 guest Linux**, vì binding VMMDev/VGA/virtio có thể khác nhau theo GA/driver.
 - `showvminfo` không đọc CFGM nội bộ; T3 dùng `debugvm <vm> info pci verbose` + collector trong guest. Nếu cần kiểm tra materialize, thêm debug-info `cfgm` test-only.
 - T3 chỉ có ý nghĩa khi guest thực sự boot tới userspace và collector chạy xong; “no bootable device” không phải T3.
-- **Hiện trạng:** chưa có job `t3-runtime`; guest collector Windows/Linux đã có script + self-test trong `smoke` nhưng chưa capture thật; script host chỉ chạy 2 lần; các task `0.4.3a–c` phải xong trước khi gate T3 có hiệu lực.
+- **Hiện trạng:** job `t3-runtime` đã có (chỉ chạy khi dispatch với input `run_t3` + biến repo `CLOAK_T3_ENABLED='true'`) và orchestrator `t3-runtime.ps1` có self-test xanh trong `smoke`; guest collector + comparator đã có; **chờ runner self-hosted (O8)** để capture thật 3 boot; script host `collect-identity.ps1` vẫn chỉ chạy 2 lần.
 
 Yêu cầu VM cho T3:
 - Guest Windows (PE/WinPE hoặc image test) và Linux live có disk ảo; T3 dùng VM có disk, **không** dùng chế độ no-disk của script host; `debugvm` chạy trên chính VM đó.
@@ -1125,7 +1125,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.4.1 | T1/T2: scan binary + config plane | `.github/workflows/build.yml` + `.github/scripts/scan-identity.ps1`, `collect-identity.ps1` | ✅ **đã làm** | Artifact `cloak-identity-report` + `binary-identity.txt` |
 | 0.4.1a | Verify `build-identity.json` + manifest nhúng | build + `.github/scripts/verify-manifest.ps1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | ✅ **đã làm** | Verify schema/hash/family/chipset/binding; build sinh `build-identity.json`; header nhúng qua `VBOX_WITH_CLOAK_BUILD`; mismatch fail |
 | 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** | Xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
-| 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | ⬜ **chưa làm** | `t3-runtime` job; `VBoxDrv` + VT-x; fail nếu thiếu |
+| 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | 🟡 **một phần** | Job `t3-runtime` (gated: dispatch `run_t3` + biến `CLOAK_T3_ENABLED`) + `.github/scripts/t3-runtime.ps1` (self-test xanh trong `smoke`); fail exit 3 nếu thiếu `VBoxDrv`/VT-x; **chờ runner O8** |
 | 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | 🟡 **một phần** | Script Windows/Linux viết xong theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 (0.4.3) |
 | 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
 | 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | ⬜ **chưa làm** | 3 boot giống hệt; state restore không trộn identity |
@@ -1168,7 +1168,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | CI-12 | `LocalConfig.kmk` bị ghi đè mỗi run | OK — file nằm trong `.gitignore`, sinh lại mỗi job |
 | CI-13 | Hosted runner không có `VBoxDrv`/nested virt | T3 phải chạy self-hosted; `smoke` hosted chỉ T1/T2 |
 | CI-14 | `collect-identity.ps1` skip runtime | Bắt buộc `-RequireRuntime` ở T3; không dùng exit 0 khi thiếu runtime |
-| CI-15 | Chưa có job `t3-runtime`/guest collector trong workflow | Task `0.4.3a-c`; gate `0.4.4` |
+| CI-15 | Job `t3-runtime`/guest collector trong workflow | Đã có: job gated + `collect-guest-identity.*` + `t3-runtime.ps1`; capture thật chờ runner O8; gate `0.4.4` |
 | CI-16 | Comparator mask hex có thể che identity thật | Dùng schema comparator + negative tests §4.7.4.1 |
 | CI-17 | T3 artifact có thể chứa serial/UUID | Redaction/isolation §4.7.4.2; không upload raw dump |
 
@@ -1815,7 +1815,7 @@ Repo **đã có** workflow `.github/workflows/build.yml` (1000 dòng, đã commi
 | `build` | Toàn bộ + GUI (Qt 6.8.0) — **trừ** Guest Additions (`VBOX_WITHOUT_ADDITIONS=1`); sinh `build-identity.json` | yasm, Qt 6.8.0, SDL 1.2.15 |
 | `smoke` | T1/T2: scan binary + config plane + verify manifest; không chạy VM | — |
 | `full-additions` | Build kèm Guest Additions (cần WDK) | WDK 19041 MSI/CAB |
-| `t3-runtime` (kế hoạch) | T3: VM thật 3 boot + guest collector Windows/Linux | self-hosted runner có VT-x/VBoxDrv |
+| `t3-runtime` (gated) | T3: VM thật 3 boot + guest collector Windows/Linux; dispatcher `run_t3` + biến `CLOAK_T3_ENABLED`; orchestrator `t3-runtime.ps1` | self-hosted runner có VT-x/VBoxDrv (**chờ O8**) |
 
 **Checkout đã sửa:** workflow dùng `repository: ${{ github.repository }}` tại `build.yml:42`, không còn build upstream. T3 runtime phải chạy self-hosted, xem [§4.7.4](#474-ba-tầng-kiểm-chứng-thay-cho-smoke-chạy-vm-trên-hosted-runner).
 
@@ -2036,8 +2036,8 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4b — full-additions    → .github/scripts/install-wdk.ps1
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
 [x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
-[~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke; chưa ghép job T3)
-[ ] Phase 0.4c — T3 self-hosted    ← chưa làm
+[~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke)
+[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke); chờ runner O8
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -2046,11 +2046,12 @@ Chỉ bắt đầu code identity khi:
 | Hạng mục | Trạng thái |
 |---|---|
 | Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi |
-| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; build sinh `build-identity.json`; smoke verify manifest + header generator + comparator self-test + guest collector self-test |
+| `.github/workflows/build.yml` | Đã commit; job `build`, `full-additions`, `smoke`, `t3-runtime` (gated); build sinh `build-identity.json`; smoke verify manifest + header generator + comparator + guest collector + T3 orchestrator self-test |
 | `.github/scripts/verify-manifest.ps1`, `CloakManifest.psm1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | Verify/sinh manifest stock+cloak và header nhúng; fixture `testdata/build-identity.cloak.json` |
 | `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
-| `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 cần refactor theo §4.7.4.1 |
+| `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 dùng `t3-runtime.ps1` (3 boot + comparator); chờ runner O8 |
+| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
 | `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
 | `.gitignore` | Bỏ qua `build-identity.json`, `source-revision.txt`, `CloakBuildIdentity.h` |
@@ -2059,7 +2060,7 @@ Chỉ bắt đầu code identity khi:
 Khi nhận chỉ thị "triển khai", thứ tự đề xuất:
 
 1. Phase 0.1-0.2 (branch + build local) — *đã làm* (branch `feature/cloak-foundation` + CI build xanh)
-2. Phase 0.4c (T3 self-hosted) + Phase 0.5 (xác minh path pcbios ↔ efi; implementation ở PR-2)
+2. Phase 0.4c (T3 self-hosted) — *đã làm phần job+script; chờ runner O8*; Phase 0.5 (xác minh path pcbios ↔ efi; implementation ở PR-2)
 3. Phase 1.0 (MPE/control plane) → **PR-1** (đã triển khai; còn 0.4.3a/b ghép T3)
 4. Phase 1 (CPU/firmware) → **PR-2**, coherence slice
 5. Phase 2 (device identity) → **PR-3**, coherence slice + binding test

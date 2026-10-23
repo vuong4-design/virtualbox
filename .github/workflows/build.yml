@@ -2,6 +2,11 @@ name: Build VirtualBox 7.2 (Windows x64)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_t3:
+        description: 'Chay job t3-runtime tren self-hosted runner (can dang ky runner + bat bien CLOAK_T3_ENABLED)'
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -984,6 +989,16 @@ jobs:
           & ".\scripts\compare-identity.ps1" -Reference $linuxJson -Candidate $linuxJson;
           if ($LASTEXITCODE -ne 0) { throw "compare-identity.ps1 rejected the Linux guest document: $LASTEXITCODE" }
 
+      - name: Verify T3 runtime orchestration self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\t3-runtime.ps1" -SelfTest;
+          if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 self-test failed: $LASTEXITCODE" }
+          & ".\scripts\t3-runtime.ps1" -ValidateConfig -ConfigPath ".\scripts\testdata\t3-config.sample.json";
+          if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 config validation failed: $LASTEXITCODE" }
+
       - name: Verify generated build identity manifest
         shell: pwsh
         run: |
@@ -1077,3 +1092,50 @@ jobs:
           Write-Host "===== PCI identity (ich9-bios, run 1) =====";
           $pci = "identity-out\ich9-bios\run1\info-pci.txt";
           if (Test-Path $pci) { Get-Content $pci -TotalCount 100 };
+
+  t3-runtime:
+    # T3 KHONG chay tren hosted runner va KHONG fallback sang hosted:
+    #   - chi chay khi dispatch thu cong voi input run_t3=true
+    #   - va bien repo CLOAK_T3_ENABLED='true' (chi bat sau khi runner label
+    #     cloak-t3 da dang ky — tranh job xep hang vo han khi chua co runner).
+    # Thieu VBoxDrv/VT-x -> script fail (exit 3), khong skip.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_t3 && vars.CLOAK_T3_ENABLED == 'true' }}
+    needs: build
+    runs-on: [self-hosted, windows, x64, cloak-t3]
+    timeout-minutes: 240
+
+    env:
+      CLOAK_T3_GUEST_PASSWORD: ${{ secrets.CLOAK_T3_GUEST_PASSWORD }}
+      CLOAK_T3_CONFIG: ${{ vars.CLOAK_T3_CONFIG }}
+
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: virtualbox-7.2-windows-amd64-binaries
+          path: vbox
+
+      - name: Download CI scripts
+        uses: actions/download-artifact@v4
+        with:
+          name: cloak-ci-scripts
+          path: scripts
+
+      - name: Run T3 runtime identity verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          if (-not $env:CLOAK_T3_CONFIG) { throw "Bien repo CLOAK_T3_CONFIG (duong dan t3-config.json tren runner) chua duoc dat" }
+          & ".\scripts\t3-runtime.ps1" -VBoxDir "vbox" -WorkDir "t3-out" -ConfigPath $env:CLOAK_T3_CONFIG;
+          if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 failed: $LASTEXITCODE" }
+
+      - name: Upload redacted T3 report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloak-t3-report
+          if-no-files-found: warn
+          path: |
+            t3-out/t3-report.json
+            t3-out/run*/**/guest-compare.json

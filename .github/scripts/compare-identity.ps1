@@ -672,10 +672,21 @@ try {
     if ($ReportPath) {
         $ReportStatus = 'match'
         if ($Failed) { $ReportStatus = 'mismatch' }
+        # Guest collector document khong co buildHash (host manifest moi co) -> truy cap an toan.
+        $ReferenceSchemaVersion = ''
+        $ReferenceBuildHash = ''
+        $SchemaProperty = $ReferenceDocument.PSObject.Properties['schemaVersion']
+        if ($null -ne $SchemaProperty -and $null -ne $SchemaProperty.Value) {
+            $ReferenceSchemaVersion = [string] $SchemaProperty.Value
+        }
+        $BuildHashProperty = $ReferenceDocument.PSObject.Properties['buildHash']
+        if ($null -ne $BuildHashProperty -and $null -ne $BuildHashProperty.Value) {
+            $ReferenceBuildHash = [string] $BuildHashProperty.Value
+        }
         $Report = [pscustomobject] @{
             reportFormatVersion = 1
-            schemaVersion       = [string] $ReferenceDocument.schemaVersion
-            buildHash           = [string] $ReferenceDocument.buildHash
+            schemaVersion       = $ReferenceSchemaVersion
+            buildHash           = $ReferenceBuildHash
             reference           = $Reference
             includeValues       = [bool] $IncludeValues
             status              = $ReportStatus
