@@ -1006,6 +1006,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path $auditDir | Out-Null;
           & ".\scripts\t3-runtime.ps1" -WorkDir $auditDir -AuditArtifacts;
           if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 artifact audit mode failed: $LASTEXITCODE" }
+          & ".\scripts\t3-runtime.ps1" -CheckRuntime -VBoxDir "$env:RUNNER_TEMP\no-vbox";
+          if ($LASTEXITCODE -ne 2) { throw "t3-runtime.ps1 CheckRuntime error path expected exit 2, got $LASTEXITCODE" }
 
       - name: Verify generated build identity manifest
         shell: pwsh

@@ -49,6 +49,11 @@
     Chỉ audit redaction trên tập file artifact trong WorkDir rồi thoát
     (dùng trong job T3 trước bước upload; không cần VM).
 
+.PARAMETER CheckRuntime
+    Chỉ kiểm tra runner đã sẵn sàng chạy T3 rồi thoát: VBoxManage + VBoxDrv/VT-x,
+    và nếu có ConfigPath thì thêm VM đã đăng ký + seed/hash đã provision đúng.
+    Dùng khi bring-up runner self-hosted (O8); không boot VM.
+
 .NOTES
     Exit code:
         0 = identity ổn định qua N boot (host + toàn bộ guest)
@@ -88,7 +93,8 @@ param(
     [string] $ConfigPath,
     [switch] $SelfTest,
     [switch] $ValidateConfig,
-    [switch] $AuditArtifacts
+    [switch] $AuditArtifacts,
+    [switch] $CheckRuntime
 )
 
 Set-StrictMode -Version Latest
@@ -1207,6 +1213,89 @@ if ($AuditArtifacts) {
         exit 2
     }
     Write-Host 'T3 artifacts clean.'
+    exit 0
+}
+
+if ($CheckRuntime) {
+    if (-not $VBoxDir) { Write-ErrorLine 'CheckRuntime requires VBoxDir.'; exit 2 }
+    $script:T3VBoxManage = Join-Path $VBoxDir 'VBoxManage.exe'
+    if (-not (Test-Path -LiteralPath $script:T3VBoxManage)) {
+        Write-ErrorLine "VBoxManage.exe not found: $($script:T3VBoxManage)"
+        exit 2
+    }
+
+    $versionOutput = Invoke-T3VBoxManage '--version'
+    if ($LASTEXITCODE -ne 0) {
+        Write-ErrorLine "VBoxManage --version failed (exit $LASTEXITCODE): $versionOutput"
+        exit 2
+    }
+    Write-Step "VBoxManage version: $($versionOutput.Trim())"
+
+    Assert-T3RuntimeAvailable
+
+    if ($ConfigPath) {
+        $checkConfig = Read-T3Config -Path $ConfigPath
+        $checkVmList = Invoke-T3VBoxManage 'list' 'vms'
+        if ($LASTEXITCODE -ne 0) {
+            Write-ErrorLine "VBoxManage list vms failed (exit $LASTEXITCODE): $checkVmList"
+            exit 2
+        }
+        $checkNeedsSeed = $checkConfig.StateTest -and ($checkConfig.StateTests.SaveStateSeedMismatch -or $checkConfig.StateTests.SnapshotSeedMismatch)
+        foreach ($checkGuest in $checkConfig.Guests) {
+            $quotedName = '"' + $checkGuest.Name + '"'
+            if ($checkVmList -notmatch [regex]::Escape($quotedName)) {
+                Write-ErrorLine "VM '$($checkGuest.Name)' is not registered on this runner."
+                exit 2
+            }
+
+            $checkSeedRaw = Get-T3ExtraData -Name $checkGuest.Name -Key 'VBoxInternal/Cloak/Seed'
+            $checkHashRaw = Get-T3ExtraData -Name $checkGuest.Name -Key 'VBoxInternal/Cloak/SeedHash'
+            $checkProfileRaw = Get-T3ExtraData -Name $checkGuest.Name -Key 'VBoxInternal/Cloak/Profile'
+
+            $checkSeedHex = ''
+            if ($checkSeedRaw -match '^string:([0-9a-fA-F]{64})$') { $checkSeedHex = $Matches[1].ToLowerInvariant() }
+            $checkHashStored = ''
+            if ($checkHashRaw -match '^([0-9a-fA-F]{64})$') { $checkHashStored = $Matches[1].ToUpperInvariant() }
+
+            $seedStatus = 'missing'
+            if ($checkSeedHex) { $seedStatus = 'ok' }
+            elseif ($checkSeedRaw) { $seedStatus = 'invalid' }
+
+            $hashStatus = 'missing'
+            if ($checkSeedHex -and $checkHashStored) {
+                $checkBytes = New-Object byte[] 32
+                for ($i = 0; $i -lt $checkBytes.Length; $i++) {
+                    $checkBytes[$i] = [System.Convert]::ToByte($checkSeedHex.Substring($i * 2, 2), 16)
+                }
+                $sha = [System.Security.Cryptography.SHA256]::Create()
+                try {
+                    $checkComputed = ([BitConverter]::ToString($sha.ComputeHash($checkBytes))).Replace('-', '')
+                }
+                finally {
+                    $sha.Dispose()
+                    [System.Array]::Clear($checkBytes, 0, $checkBytes.Length)
+                }
+                if ($checkHashStored -eq $checkComputed) { $hashStatus = 'matches' } else { $hashStatus = 'MISMATCH' }
+            }
+            elseif ($checkHashRaw) { $hashStatus = 'invalid' }
+
+            $profileStatus = 'unset'
+            if ($checkProfileRaw) { $profileStatus = $checkProfileRaw }
+
+            Write-Host "  guest=$($checkGuest.Name) vm=registered seed=$seedStatus seedHash=$hashStatus profile=$profileStatus"
+
+            if ($hashStatus -eq 'MISMATCH' -or $hashStatus -eq 'invalid') {
+                Write-ErrorLine "guest '$($checkGuest.Name)': stored seed hash does not match the seed; re-provision with provision-cloak.ps1 -Force."
+                exit 2
+            }
+            if ($checkNeedsSeed -and -not $checkSeedHex) {
+                Write-ErrorLine "guest '$($checkGuest.Name)': stateTest negative tests need a provisioned seed; run provision-cloak.ps1 first."
+                exit 2
+            }
+        }
+    }
+
+    Write-Step 'Runner is ready for T3.'
     exit 0
 }
 

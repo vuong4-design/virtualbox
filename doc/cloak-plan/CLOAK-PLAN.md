@@ -979,7 +979,7 @@ Quy tắc:
 - T3 phải có ít nhất **1 guest Windows + 1 guest Linux**, vì binding VMMDev/VGA/virtio có thể khác nhau theo GA/driver.
 - `showvminfo` không đọc CFGM nội bộ; T3 dùng `debugvm <vm> info pci verbose` + collector trong guest. Nếu cần kiểm tra materialize, thêm debug-info `cfgm` test-only.
 - T3 chỉ có ý nghĩa khi guest thực sự boot tới userspace và collector chạy xong; “no bootable device” không phải T3.
-- **Hiện trạng:** job `t3-runtime` đã có (chỉ chạy khi dispatch với input `run_t3` + biến repo `CLOAK_T3_ENABLED='true'`) và orchestrator `t3-runtime.ps1` có self-test xanh trong `smoke`; orchestrator đã có `stateTest` cho §4.6.5: save-state → resume, snapshot → restore (so baseline, fail nếu khác) + 2 negative test đổi seed/seed-hash (kỳ vọng resume/restore bị từ chối); guest collector + comparator đã có; **chờ runner self-hosted (O8)** để capture thật 3 boot + state test; script host `collect-identity.ps1` vẫn chỉ chạy 2 lần.
+- **Hiện trạng:** job `t3-runtime` đã có (chỉ chạy khi dispatch với input `run_t3` + biến repo `CLOAK_T3_ENABLED='true'`) và orchestrator `t3-runtime.ps1` có self-test xanh trong `smoke`; orchestrator đã có `stateTest` cho §4.6.5: save-state → resume, snapshot → restore (so baseline, fail nếu khác) + 2 negative test đổi seed/seed-hash (kỳ vọng resume/restore bị từ chối); bring-up runner: `t3-runtime.ps1 -CheckRuntime` (VBoxManage/VBoxDrv/VT-x + VM đăng ký + seed/hash khớp) và `provision-cloak.ps1 -Verify`; guest collector + comparator đã có; **chờ runner self-hosted (O8)** để capture thật 3 boot + state test; script host `collect-identity.ps1` vẫn chỉ chạy 2 lần.
 
 Yêu cầu VM cho T3:
 - Guest Windows (PE/WinPE hoặc image test) và Linux live có disk ảo; T3 dùng VM có disk, **không** dùng chế độ no-disk của script host; `debugvm` chạy trên chính VM đó.
@@ -2038,7 +2038,7 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
 [x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
 [~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke)
-[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5; audit redaction 0.4.5); chờ runner O8
+[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5; audit redaction 0.4.5; `-CheckRuntime` bring-up runner); chờ runner O8
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -2052,8 +2052,8 @@ Chỉ bắt đầu code identity khi:
 | `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 dùng `t3-runtime.ps1` (3 boot + comparator); chờ runner O8 |
-| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); audit redaction artifact (0.4.5, `-AuditArtifacts`); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
-| `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
+| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); audit redaction artifact (0.4.5, `-AuditArtifacts`); `-CheckRuntime` bring-up runner (VBoxManage + VBoxDrv/VT-x + VM/seed nếu có config); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
+| `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff`; `-Verify` kiểm tra seed/hash đã provision + hash khớp mà không ghi gì |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
 | `.gitignore` | Bỏ qua `build-identity.json`, `source-revision.txt`, `CloakBuildIdentity.h` |
 | Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` — cập nhật theo trạng thái PR-1 |

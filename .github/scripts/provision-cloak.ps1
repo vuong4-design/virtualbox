@@ -9,6 +9,8 @@ param(
 
     [switch]$Force,
 
+    [switch]$Verify,
+
     [string]$SeedHex
 )
 
@@ -56,6 +58,40 @@ $existing = $null
 if ($LASTEXITCODE -eq 0 -and $existingRaw -match '^Value: (.+)$') {
     $existing = $Matches[1]
 }
+
+if ($Verify) {
+    $verifyHashRaw = & $VBoxManage getextradata $VM $hashKey 2>&1
+    $storedHash = $null
+    if ($LASTEXITCODE -eq 0 -and $verifyHashRaw -match '^Value: ([0-9a-fA-F]{64})$') {
+        $storedHash = $Matches[1].ToUpperInvariant()
+    }
+    if (-not $existing) {
+        throw "Cloak seed is not provisioned for '$VM'"
+    }
+    if ($existing -notmatch '^string:([0-9a-fA-F]{64})$') {
+        throw "Cloak seed value is malformed for '$VM'"
+    }
+    $verifyHex = $Matches[1].ToLowerInvariant()
+    $verifyBytes = New-Object byte[] 32
+    for ($i = 0; $i -lt $verifyBytes.Length; $i++) {
+        $verifyBytes[$i] = [System.Convert]::ToByte($verifyHex.Substring($i * 2, 2), 16)
+    }
+    try {
+        $computedHash = Get-Sha256Hex -Data $verifyBytes
+    }
+    finally {
+        [System.Array]::Clear($verifyBytes, 0, $verifyBytes.Length)
+    }
+    if (-not $storedHash) {
+        throw "Cloak seed hash is missing for '$VM'; re-provision with -Force"
+    }
+    if ($storedHash -ne $computedHash) {
+        throw "Cloak seed hash mismatch for '$VM'; re-provision with -Force"
+    }
+    Write-Output "Cloak seed verified for '$VM' (sha256=$($computedHash.Substring(0, 16))..., stored hash matches)."
+    exit 0
+}
+
 if ($existing -and -not $Force) {
     throw "Cloak seed already provisioned for '$VM'; use -Force to re-seed"
 }
