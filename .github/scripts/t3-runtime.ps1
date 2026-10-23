@@ -26,7 +26,9 @@
     Negative test cần cloak build + seed đã provision (`provision-cloak.ps1`).
 
     Report chỉ chứa dữ liệu đã redact (comparator mặc định redact giá trị);
-    raw dump giữ local trong WorkDir, không upload.
+    raw dump giữ local trong WorkDir, không upload. Trước khi publish, script
+    tự chạy audit redaction trên đúng tập file artifact (report + guest-compare);
+    có seed/hash 64 hex, key ExtraData hay marker bí mật -> exit 2, không upload.
 
 .PARAMETER VBoxDir
     Thư mục chứa VBoxManage.exe (ví dụ "vbox" — artifact của job build).
@@ -42,6 +44,10 @@
 
 .PARAMETER ValidateConfig
     Chỉ đọc và kiểm tra ConfigPath rồi thoát (dùng được trên hosted runner).
+
+.PARAMETER AuditArtifacts
+    Chỉ audit redaction trên tập file artifact trong WorkDir rồi thoát
+    (dùng trong job T3 trước bước upload; không cần VM).
 
 .NOTES
     Exit code:
@@ -81,7 +87,8 @@ param(
     [string] $WorkDir,
     [string] $ConfigPath,
     [switch] $SelfTest,
-    [switch] $ValidateConfig
+    [switch] $ValidateConfig,
+    [switch] $AuditArtifacts
 )
 
 Set-StrictMode -Version Latest
@@ -986,6 +993,56 @@ function Write-T3Report {
 }
 
 # ---------------------------------------------------------------------------
+# Artifact redaction audit (0.4.5) - chi quet dung tap file se upload
+# ---------------------------------------------------------------------------
+function Get-T3ArtifactPaths {
+    param([string] $Root)
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    if (-not (Test-Path -LiteralPath $Root)) { return $paths.ToArray() }
+    $resolvedRoot = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+
+    $report = Join-Path $resolvedRoot 't3-report.json'
+    if (Test-Path -LiteralPath $report) { $paths.Add($report) }
+
+    foreach ($file in Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Filter 'guest-compare.json' -File -ErrorAction SilentlyContinue) {
+        $relative = $file.FullName.Substring($resolvedRoot.Length).TrimStart('\')
+        if ($relative -match '^run\d+\\[^\\]+\\guest-compare\.json$' -or
+            $relative -match '^state\\[^\\]+\\[^\\]+\\guest-compare\.json$') {
+            $paths.Add($file.FullName)
+        }
+    }
+    return $paths.ToArray()
+}
+
+function Get-T3RedactionViolations {
+    param([string] $Root)
+
+    $rules = @(
+        [pscustomobject] @{ Name = 'seed-or-sha256-hex'; Pattern = '(?i)\b[0-9a-f]{64}\b' }
+        [pscustomobject] @{ Name = 'cloak-extradata-key'; Pattern = 'VBoxInternal/Cloak' }
+        [pscustomobject] @{ Name = 'secret-marker'; Pattern = '(?i)(password\s*[:=]|-----BEGIN)' }
+    )
+
+    $violations = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in Get-T3ArtifactPaths -Root $Root) {
+        $text = ''
+        try {
+            $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+        }
+        catch {
+            continue
+        }
+        foreach ($rule in $rules) {
+            if ($text -match $rule.Pattern) {
+                $violations.Add((Split-Path -Leaf $path) + ': ' + $rule.Name)
+            }
+        }
+    }
+    return $violations.ToArray()
+}
+
+# ---------------------------------------------------------------------------
 # Self-test — khong can VM
 # ---------------------------------------------------------------------------
 function Assert-T3SelfTest {
@@ -1091,6 +1148,22 @@ function Invoke-T3SelfTest {
         $written = (Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8) | ConvertFrom-Json
         Assert-T3SelfTest -Name 'report is valid JSON with schema' -Condition ($written.reportFormatVersion -eq 1 -and $written.status -eq 'pass')
         Assert-T3SelfTest -Name 'report carries state test results' -Condition ($written.guests[0].state.saveStateRestore.status -eq 'pass')
+
+        Write-Step 'Self-test: artifact redaction audit'
+        $artifactRoot = Join-Path $root 'artifacts'
+        $artifactRunDir = Join-Path $artifactRoot 'run1\self-test-guest'
+        $null = New-Item -ItemType Directory -Force -Path $artifactRunDir
+        $artifactFile = Join-Path $artifactRunDir 'guest-compare.json'
+        Set-Content -LiteralPath $artifactFile -Value '{"reportFormatVersion":1,"status":"pass"}' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $artifactRoot 't3-report.json') -Value '{"reportFormatVersion":1}' -Encoding utf8
+        Assert-T3SelfTest -Name 'redaction audit accepts clean artifacts' -Condition ((@(Get-T3RedactionViolations -Root $artifactRoot)).Count -eq 0)
+        Set-Content -LiteralPath $artifactFile -Value ('{"seed":"' + ('a' * 64) + '"}') -Encoding utf8
+        Assert-T3SelfTest -Name 'redaction audit flags 64-hex token' -Condition ((@(Get-T3RedactionViolations -Root $artifactRoot)).Count -ge 1)
+        Set-Content -LiteralPath $artifactFile -Value '{"note":"VBoxInternal/Cloak/SeedHash"}' -Encoding utf8
+        Assert-T3SelfTest -Name 'redaction audit flags Cloak extradata key' -Condition ((@(Get-T3RedactionViolations -Root $artifactRoot)).Count -ge 1)
+        Set-Content -LiteralPath $artifactFile -Value '{"reportFormatVersion":1}' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $artifactRoot 'guest-identity.json') -Value ('{"serial":"' + ('a' * 64) + '"}') -Encoding utf8
+        Assert-T3SelfTest -Name 'redaction audit ignores non-artifact names' -Condition ((@(Get-T3RedactionViolations -Root $artifactRoot)).Count -eq 0)
     }
     finally {
         if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
@@ -1118,6 +1191,22 @@ if ($ValidateConfig) {
     if ($validated.UsesPassword -and -not $env:CLOAK_T3_GUEST_PASSWORD) {
         Write-Host '  WARNING: config uses {password} but CLOAK_T3_GUEST_PASSWORD is not set in this environment.' -ForegroundColor Yellow
     }
+    exit 0
+}
+
+if ($AuditArtifacts) {
+    if (-not $WorkDir) { Write-ErrorLine 'AuditArtifacts requires WorkDir.'; exit 2 }
+    $artifactPaths = @(Get-T3ArtifactPaths -Root $WorkDir)
+    Write-Step "Artifact redaction audit: $($artifactPaths.Count) file(s) in $WorkDir"
+    foreach ($artifactPath in $artifactPaths) { Write-Host "  $artifactPath" }
+    $auditViolations = @(Get-T3RedactionViolations -Root $WorkDir)
+    if ($auditViolations.Count -gt 0) {
+        foreach ($auditViolation in $auditViolations) {
+            Write-ErrorLine "artifact redaction violation: $auditViolation"
+        }
+        exit 2
+    }
+    Write-Host 'T3 artifacts clean.'
     exit 0
 }
 
@@ -1314,6 +1403,15 @@ elseif ($anyMismatch)  { $overallStatus = 'fail';  $exitCode = 1 }
 $reportPath = Join-Path $WorkDir 't3-report.json'
 Write-T3Report -Path $reportPath -Status $overallStatus -Guests $guestReports.ToArray() -Runs $config.Runs
 Write-Step "Report: $reportPath (status=$overallStatus)"
+
+$artifactViolations = @(Get-T3RedactionViolations -Root $WorkDir)
+if ($artifactViolations.Count -gt 0) {
+    foreach ($artifactViolation in $artifactViolations) {
+        Write-ErrorLine "artifact redaction violation: $artifactViolation"
+    }
+    Write-ErrorLine 'Refusing to publish T3 artifacts: redaction audit failed.'
+    exit 2
+}
 
 foreach ($guestReport in $guestReports) {
     Write-Host "  guest=$($guestReport.name) status=$($guestReport.status) host=$($guestReport.host.status)"

@@ -1008,6 +1008,7 @@ Không dùng hash của raw text làm bằng chứng duy nhất; raw dump chứa
 - Không đưa `CloakSeed`, `.vbox`, disk image hoặc dump DMI thô vào artifact.
 - Artifact report phải ghi schema version, build hash, profile ID/class, boot count; retention ngắn và có access control.
 - T3 fail vì artifact không đủ/không redact cũng là fail gate.
+- **Hiện trạng:** upload allowlist (`t3-report.json` + `run*/**/guest-compare.json` + `state/**/guest-compare.json`); `t3-runtime.ps1` audit redaction trước publish và mode `-AuditArtifacts` cho step CI (`if: always()`); upload chỉ chạy khi audit xanh. Chờ runner O8 để chạy thật.
 
 #### 4.7.5 Bổ sung: job `full-additions` (Guest Additions + WDK)
 
@@ -1130,7 +1131,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
 | 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | 🟡 **một phần** | `t3-runtime.ps1` có `stateTest` (§4.6.5): save-state→resume + snapshot→restore so baseline (fail nếu khác), 2 negative test đổi seed/seed-hash kỳ vọng bị từ chối; self-test xanh trong `smoke`; capture thật chờ runner O8 + guard `1.0.12` |
 | 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
-| 0.4.5 | T3 artifact isolation/redaction | T3 job + script | ⬜ **chưa làm** | Report redact; không seed/.vbox/raw DMI trong artifact |
+| 0.4.5 | T3 artifact isolation/redaction | T3 job + script | 🟡 **một phần** | `t3-runtime.ps1` audit redaction trước publish (chỉ quét đúng tập file upload: report + guest-compare; bắt 64-hex seed/hash, key ExtraData, marker bí mật → exit 2); job T3 có step audit `if: always()`, upload chỉ chạy khi audit xanh; self-test + smoke mode xanh; chờ runner O8 để chạy thật |
 
 **Về script `collect-identity.ps1`** (`.github/scripts/collect-identity.ps1`):
 
@@ -2037,7 +2038,7 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
 [x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
 [~] Phase 0.4.3a/b — guest collector + schema comparator → collect-guest-identity.ps1/.sh + compare-identity.ps1 (self-test xanh trong smoke)
-[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5); chờ runner O8
+[~] Phase 0.4c — T3 self-hosted → job `t3-runtime` (gated) + t3-runtime.ps1 (self-test/validate xanh trong smoke; `stateTest` cho saved-state/snapshot §4.6.5; audit redaction 0.4.5); chờ runner O8
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
 
@@ -2051,7 +2052,7 @@ Chỉ bắt đầu code identity khi:
 | `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 dùng `t3-runtime.ps1` (3 boot + comparator); chờ runner O8 |
-| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
+| `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); audit redaction artifact (0.4.5, `-AuditArtifacts`); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |
 | `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
 | `.gitignore` | Bỏ qua `build-identity.json`, `source-revision.txt`, `CloakBuildIdentity.h` |

@@ -1002,6 +1002,10 @@ jobs:
           (Get-Content ".\scripts\testdata\t3-config.sample.json" -Raw -Encoding UTF8) -replace '"stateTest": false', '"stateTest": true' | Set-Content -LiteralPath $stateConfig -Encoding utf8;
           & ".\scripts\t3-runtime.ps1" -ValidateConfig -ConfigPath $stateConfig;
           if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 stateTest config validation failed: $LASTEXITCODE" }
+          $auditDir = Join-Path $env:RUNNER_TEMP "t3-audit";
+          New-Item -ItemType Directory -Force -Path $auditDir | Out-Null;
+          & ".\scripts\t3-runtime.ps1" -WorkDir $auditDir -AuditArtifacts;
+          if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 artifact audit mode failed: $LASTEXITCODE" }
 
       - name: Verify generated build identity manifest
         shell: pwsh
@@ -1134,8 +1138,18 @@ jobs:
           & ".\scripts\t3-runtime.ps1" -VBoxDir "vbox" -WorkDir "t3-out" -ConfigPath $env:CLOAK_T3_CONFIG;
           if ($LASTEXITCODE -ne 0) { throw "t3-runtime.ps1 failed: $LASTEXITCODE" }
 
-      - name: Upload redacted T3 report
+      - name: Audit T3 artifacts (redaction)
+        id: t3-audit
         if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\t3-runtime.ps1" -WorkDir "t3-out" -AuditArtifacts;
+          if ($LASTEXITCODE -ne 0) { throw "T3 artifact redaction audit failed: $LASTEXITCODE" }
+
+      - name: Upload redacted T3 report
+        if: always() && steps.t3-audit.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: cloak-t3-report
@@ -1143,3 +1157,4 @@ jobs:
           path: |
             t3-out/t3-report.json
             t3-out/run*/**/guest-compare.json
+            t3-out/state/**/guest-compare.json
