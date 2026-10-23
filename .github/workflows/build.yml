@@ -945,6 +945,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "generate-build-identity-header.ps1 failed: $LASTEXITCODE" }
           if (-not (Select-String -LiteralPath $header -Pattern "FC03B2E69D912989C87289C8CC8A48A39F8B991894203ACA56706F87E297FDC5" -SimpleMatch -Quiet)) { throw "generated header is missing the expected build hash" }
 
+      - name: Verify identity comparator self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          & ".\scripts\compare-identity.ps1" -SelfTest;
+          if ($LASTEXITCODE -ne 0) { throw "compare-identity.ps1 self-test failed: $LASTEXITCODE" }
+
       - name: Verify generated build identity manifest
         shell: pwsh
         run: |

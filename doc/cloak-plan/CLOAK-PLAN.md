@@ -1123,11 +1123,11 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.3.5 | Ghi `source-revision.txt` (repo/ref/sha) vào artifact | `.github/workflows/build.yml` | ✅ **đã làm** | Artifact diagnostics có file |
 | 0.3.6 | `concurrency` để huỷ run cũ | `.github/workflows/build.yml:19-22` | ✅ **đã làm** | Push liên tiếp chỉ giữ run mới |
 | 0.4.1 | T1/T2: scan binary + config plane | `.github/workflows/build.yml` + `.github/scripts/scan-identity.ps1`, `collect-identity.ps1` | ✅ **đã làm** | Artifact `cloak-identity-report` + `binary-identity.txt` |
-| 0.4.1a | Verify `build-identity.json` + manifest nhúng | build + `.github/scripts/verify-manifest.ps1` | ⬜ **chưa làm** | Family/chipset/binding/hash khớp; mismatch fail |
+| 0.4.1a | Verify `build-identity.json` + manifest nhúng | build + `.github/scripts/verify-manifest.ps1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | ✅ **đã làm** | Verify schema/hash/family/chipset/binding; build sinh `build-identity.json`; header nhúng qua `VBOX_WITH_CLOAK_BUILD`; mismatch fail |
 | 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** | Xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
 | 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | ⬜ **chưa làm** | `t3-runtime` job; `VBoxDrv` + VT-x; fail nếu thiếu |
 | 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | ⬜ **chưa làm** | Boot tới userspace; DMI/ACPI/PCI/EDID/storage/NIC |
-| 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | ⬜ **chưa làm** | Không mask identity; negative test fail đúng |
+| 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
 | 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | ⬜ **chưa làm** | 3 boot giống hệt; state restore không trộn identity |
 | 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
 | 0.4.5 | T3 artifact isolation/redaction | T3 job + script | ⬜ **chưa làm** | Report redact; không seed/.vbox/raw DMI trong artifact |
@@ -2034,6 +2034,9 @@ Chỉ bắt đầu code identity khi:
 [x] Phase 0.3 — sửa workflow CI    → .github/workflows/build.yml
 [x] Phase 0.4 — T1/T2 + script     → .github/scripts/
 [x] Phase 0.4b — full-additions    → .github/scripts/install-wdk.ps1
+[x] Phase 0.4.1a — verify manifest + header nhúng → .github/scripts/verify-manifest.ps1, generate-build-identity.ps1, generate-build-identity-header.ps1
+[x] Phase 1.0 — MPE/PR-1 (registry rỗng, seed, state guard, saved-state, build manifest) → src/VBox/Main/src-client/ConsoleImplConfigCloak.*, tstCloakConfig.cpp
+[~] Phase 0.4.3a/b — guest collector + schema comparator → compare-identity.ps1 (self-test xanh; chưa ghép job T3)
 [ ] Phase 0.4c — T3 self-hosted    ← chưa làm
 [ ] TRIỂN KHAI phần còn lại        ← chờ chỉ thị
 ```
@@ -2042,18 +2045,21 @@ Chỉ bắt đầu code identity khi:
 
 | Hạng mục | Trạng thái |
 |---|---|
-| Mã nguồn VirtualBox (`src/`) | **Chưa sửa gì** |
-| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; checkout `${{ github.repository }}` `:42` |
+| Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi |
+| `.github/workflows/build.yml` | Đã commit; 3 job `build`, `full-additions`, `smoke`; build sinh `build-identity.json`; smoke verify manifest + header generator + comparator self-test |
+| `.github/scripts/verify-manifest.ps1`, `CloakManifest.psm1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | Verify/sinh manifest stock+cloak và header nhúng; fixture `testdata/build-identity.cloak.json` |
+| `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; chưa ghép job T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 cần refactor theo §4.7.4.1 |
+| `.github/scripts/provision-cloak.ps1` | Provision seed + seed hash qua ExtraData, verify readback; yêu cầu VM `poweroff` |
 | `.github/scripts/install-wdk.ps1` | Cài SDK+WDK 10.0.19041 (direct → layout fallback) + verify 6 thư mục |
-| `.gitignore` | Sạch, không còn thay đổi `+cloak` |
-| Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` — đã revise, **chưa commit** |
+| `.gitignore` | Bỏ qua `build-identity.json`, `source-revision.txt`, `CloakBuildIdentity.h` |
+| Tài liệu | `doc/cloak-plan/CLOAK-PLAN.md` — cập nhật theo trạng thái PR-1 |
 
 Khi nhận chỉ thị "triển khai", thứ tự đề xuất:
 
-1. Phase 0.1-0.2 (branch + build local) — *chưa làm*
+1. Phase 0.1-0.2 (branch + build local) — *đã làm* (branch `feature/cloak-foundation` + CI build xanh)
 2. Phase 0.4c (T3 self-hosted) + Phase 0.5 (xác minh path pcbios ↔ efi; implementation ở PR-2)
-3. Phase 1.0 (MPE/control plane) → **PR-1**
+3. Phase 1.0 (MPE/control plane) → **PR-1** (đã triển khai; còn 0.4.3a/b ghép T3)
 4. Phase 1 (CPU/firmware) → **PR-2**, coherence slice
 5. Phase 2 (device identity) → **PR-3**, coherence slice + binding test
 6. Phase 3 (GA rename) → **PR-4**
