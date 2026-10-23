@@ -120,24 +120,7 @@ static const CLOAKBUILDMANIFEST g_StockBuildManifest =
     NULL
 };
 #else
-static const CLOAKBUILDMANIFEST g_CloakBuildManifest =
-{
-    "cloak",
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    0,
-    CLOAKBINDING_VMMDEV_VENDOR_ID,
-    CLOAKBINDING_VMMDEV_DEVICE_ID,
-    CLOAKBINDING_VGA_VENDOR_ID,
-    CLOAKBINDING_VGA_DEVICE_ID,
-    CLOAKBINDING_VIRTIO_VENDOR_ID,
-    NULL,
-    NULL
-};
+# include "CloakBuildIdentity.h"
 #endif
 
 DECLHIDDEN(PCCLOAKBUILDMANIFEST) CloakGetBuildManifest(void)

@@ -935,6 +935,16 @@ jobs:
           & ".\scripts\verify-manifest.ps1" -ManifestPath ".\scripts\testdata\build-identity.cloak.json" -RequireCloak;
           if ($LASTEXITCODE -ne 0) { throw "verify-manifest.ps1 failed: $LASTEXITCODE" }
 
+      - name: Verify embedded manifest header generator
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop";
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force;
+          $header = Join-Path $env:RUNNER_TEMP "CloakBuildIdentity.h";
+          & ".\scripts\generate-build-identity-header.ps1" -ManifestPath ".\scripts\testdata\build-identity.cloak.json" -OutputPath $header;
+          if ($LASTEXITCODE -ne 0) { throw "generate-build-identity-header.ps1 failed: $LASTEXITCODE" }
+          if (-not (Select-String -LiteralPath $header -Pattern "FC03B2E69D912989C87289C8CC8A48A39F8B991894203ACA56706F87E297FDC5" -SimpleMatch -Quiet)) { throw "generated header is missing the expected build hash" }
+
       - name: Verify generated build identity manifest
         shell: pwsh
         run: |

@@ -15,3 +15,4 @@ cloak
 .catdesk
 /build-identity.json
 /source-revision.txt
+/src/VBox/Main/src-client/CloakBuildIdentity.h
