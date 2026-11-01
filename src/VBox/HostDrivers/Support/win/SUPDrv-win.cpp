@@ -2810,6 +2810,22 @@ static bool supdrvNtAddExclRegion(SUPDRVNTEXCLREGIONS *pRegions, uint32_t uRvaRe
 }
 
 
+/**
+ * Excludes a relocated pointer variable only when it belongs to the image.
+ * Native Windows loading may initialize the security cookie / guard pointers
+ * differently than RTLdrGetBits; do not exclude arbitrary out-of-image RVAs.
+ */
+static bool supdrvNtAddExclPointer(SUPDRVNTEXCLREGIONS *pRegions, PSUPDRVLDRIMAGE pImage, uintptr_t uPointer)
+{
+    uintptr_t const uBase = (uintptr_t)pImage->pvImage;
+    if (   uPointer < uBase
+        || pImage->cbImageBits < sizeof(void *)
+        || uPointer - uBase > pImage->cbImageBits - sizeof(void *))
+        return false;
+    return supdrvNtAddExclRegion(pRegions, (uint32_t)(uPointer - uBase), sizeof(void *));
+}
+
+
 int  VBOXCALL   supdrvOSLdrLoad(PSUPDRVDEVEXT pDevExt, PSUPDRVLDRIMAGE pImage, const uint8_t *pbImageBits, PSUPLDRLOAD pReq)
 {
     NOREF(pDevExt);
@@ -2846,22 +2862,19 @@ int  VBOXCALL   supdrvOSLdrLoad(PSUPDRVDEVEXT pDevExt, PSUPDRVLDRIMAGE pImage, c
             return VINF_SUCCESS;
 
         /*
-         * On Windows Server 2003 (sp2 x86) both import thunk tables are fixed
-         * up and we typically get a mismatch in the INIT section.
-         *
-         * So, lets see if everything matches when excluding the
-         * OriginalFirstThunk tables and (maybe) the ImageBase member.
-         * For simplicity the max number of exclusion regions is set to 16.
+         * Compare everything except fields that the native NT loader may
+         * initialize differently (ImageBase, security cookie and guard pointers).
+         * Import descriptors are optional: VMMR0 can have a load-config security
+         * cookie with no import directory.
          */
+        IMAGE_DATA_DIRECTORY const CfgDir = pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
         if (    pNtHdrsIprt->Signature == IMAGE_NT_SIGNATURE
             &&  pNtHdrsIprt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR_MAGIC
-            &&  pNtHdrsIprt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_IMPORT
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR)
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress > sizeof(IMAGE_NT_HEADERS)
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress < pImage->cbImageBits
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size >= sizeof(IMAGE_LOAD_CONFIG_DIRECTORY)
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress > sizeof(IMAGE_NT_HEADERS)
-            &&  pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress < pImage->cbImageBits)
+            &&  pNtHdrsIprt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG
+            &&  CfgDir.Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, SecurityCookie)
+            &&  CfgDir.Size <= pImage->cbImageBits
+            &&  CfgDir.VirtualAddress > sizeof(IMAGE_NT_HEADERS)
+            &&  CfgDir.VirtualAddress <= pImage->cbImageBits - CfgDir.Size)
         {
             SUPDRVNTEXCLREGIONS ExcludeRegions;
             ExcludeRegions.cRegions = 0;
@@ -2870,6 +2883,13 @@ int  VBOXCALL   supdrvOSLdrLoad(PSUPDRVDEVEXT pDevExt, PSUPDRVLDRIMAGE pImage, c
             if (pNtHdrsNtLd->OptionalHeader.ImageBase != pNtHdrsIprt->OptionalHeader.ImageBase)
                 supdrvNtAddExclRegion(&ExcludeRegions, offImageBase, cbImageBase);
 
+            /* Import-table fixups are optional and independent of the cookie. */
+            IMAGE_DATA_DIRECTORY const ImpDir = pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+            if (   ImpDir.Size >= sizeof(IMAGE_IMPORT_DESCRIPTOR)
+                && ImpDir.Size <= pImage->cbImageBits
+                && ImpDir.VirtualAddress > sizeof(IMAGE_NT_HEADERS)
+                && ImpDir.VirtualAddress <= pImage->cbImageBits - ImpDir.Size)
+            {
             /* Imports: */
             uint32_t    cImpsLeft    = pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size
                                      / sizeof(IMAGE_IMPORT_DESCRIPTOR);
@@ -2919,31 +2939,35 @@ int  VBOXCALL   supdrvOSLdrLoad(PSUPDRVDEVEXT pDevExt, PSUPDRVLDRIMAGE pImage, c
                 pImp++;
             }
 
-            /* Exclude the security cookie if present. */
-            /*uint32_t const cbCfg  = pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size; */
-            uint32_t const offCfg = pNtHdrsIprt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress;
+            }
+
+            /* Exclude only pointer variables inside the image. The NT loader
+             * initializes the security cookie independently of RTLdrGetBits.
+             * Do not trust a load-config length larger than the PE directory. */
+            uint32_t const offCfg = CfgDir.VirtualAddress;
             IMAGE_LOAD_CONFIG_DIRECTORY const * const pCfg = (IMAGE_LOAD_CONFIG_DIRECTORY const *)&pbImageBits[offCfg];
-            /** @todo validate offsets/sizes better here!   */
             if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, SecurityCookie)
-                && pCfg->SecurityCookie != NULL)
-                supdrvNtAddExclRegion(&ExcludeRegions, (uintptr_t)pCfg->SecurityCookie - (uintptr_t)pImage->pvImage, sizeof(void *));
+                && pCfg->Size <= CfgDir.Size)
+            {
+                if (pCfg->SecurityCookie != 0)
+                    supdrvNtAddExclPointer(&ExcludeRegions, pImage, (uintptr_t)pCfg->SecurityCookie);
 
-            /* Also exclude the GuardCFCheckFunctionPointer and GuardCFDispatchFunctionPointer pointer variables. */
-            if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardCFCheckFunctionPointer)
-                && pCfg->GuardCFCheckFunctionPointer != NULL)
-                supdrvNtAddExclRegion(&ExcludeRegions, (uintptr_t)pCfg->GuardCFCheckFunctionPointer - (uintptr_t)pImage->pvImage, sizeof(void *));
-            if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardCFDispatchFunctionPointer)
-                && pCfg->GuardCFDispatchFunctionPointer != NULL)
-                supdrvNtAddExclRegion(&ExcludeRegions, (uintptr_t)pCfg->GuardCFDispatchFunctionPointer - (uintptr_t)pImage->pvImage, sizeof(void *));
+                /* Guard check and dispatch pointer variables can be rewritten by Windows. */
+                if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardCFCheckFunctionPointer)
+                    && pCfg->GuardCFCheckFunctionPointer != 0)
+                    supdrvNtAddExclPointer(&ExcludeRegions, pImage, (uintptr_t)pCfg->GuardCFCheckFunctionPointer);
+                if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardCFDispatchFunctionPointer)
+                    && pCfg->GuardCFDispatchFunctionPointer != 0)
+                    supdrvNtAddExclPointer(&ExcludeRegions, pImage, (uintptr_t)pCfg->GuardCFDispatchFunctionPointer);
 
-            /* Ditto for the XFG variants: */
-            if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardXFGCheckFunctionPointer)
-                && pCfg->GuardXFGCheckFunctionPointer != NULL)
-                supdrvNtAddExclRegion(&ExcludeRegions, (uintptr_t)pCfg->GuardXFGCheckFunctionPointer - (uintptr_t)pImage->pvImage, sizeof(void *));
-            if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardXFGDispatchFunctionPointer)
-                && pCfg->GuardXFGDispatchFunctionPointer != NULL)
-                supdrvNtAddExclRegion(&ExcludeRegions, (uintptr_t)pCfg->GuardXFGDispatchFunctionPointer - (uintptr_t)pImage->pvImage, sizeof(void *));
-
+                /* XFG pointer variables are optional, depending on compiler flags. */
+                if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardXFGCheckFunctionPointer)
+                    && pCfg->GuardXFGCheckFunctionPointer != 0)
+                    supdrvNtAddExclPointer(&ExcludeRegions, pImage, (uintptr_t)pCfg->GuardXFGCheckFunctionPointer);
+                if (   pCfg->Size >= RT_UOFFSET_AFTER(IMAGE_LOAD_CONFIG_DIRECTORY, GuardXFGDispatchFunctionPointer)
+                    && pCfg->GuardXFGDispatchFunctionPointer != 0)
+                    supdrvNtAddExclPointer(&ExcludeRegions, pImage, (uintptr_t)pCfg->GuardXFGDispatchFunctionPointer);
+            }
             /** @todo What about GuardRFVerifyStackPointerFunctionPointer and
              * GuardRFFailureRoutineFunctionPointer? Ignore for now as the compiler we're
              * using (19.26.28805) sets them to zero from what I can tell. */
@@ -2957,7 +2981,8 @@ int  VBOXCALL   supdrvOSLdrLoad(PSUPDRVDEVEXT pDevExt, PSUPDRVLDRIMAGE pImage, c
             {
                 if (uRvaNext < ExcludeRegions.aRegions[i].uRva)
                     iDiff = supdrvNtCompare(pImage, pbImageBits, uRvaNext, ExcludeRegions.aRegions[i].uRva - uRvaNext, pReq);
-                uRvaNext = ExcludeRegions.aRegions[i].uRva + ExcludeRegions.aRegions[i].cb;
+                /* Overlapping exclusions must not move the compare cursor backwards. */
+                uRvaNext = RT_MAX(uRvaNext, ExcludeRegions.aRegions[i].uRva + ExcludeRegions.aRegions[i].cb);
             }
             if (!iDiff && uRvaNext < pImage->cbImageBits)
                 iDiff = supdrvNtCompare(pImage, pbImageBits, uRvaNext, pImage->cbImageBits - uRvaNext, pReq);
