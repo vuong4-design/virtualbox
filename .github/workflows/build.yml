@@ -378,23 +378,43 @@ jobs:
       # Each CI run gets a different short-lived private key, which stays in the
       # runner's certificate store. Only the PUBLIC .cer is put in the artifact.
       - name: Test-sign Windows kernel drivers
+        timeout-minutes: 8
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Write-Host 'SIGN-PHASE 1/5: Locate host drivers'
           $binOut = (Resolve-Path 'out/win.amd64/release/bin').Path
-          $drivers = @(Get-ChildItem -LiteralPath $binOut -Filter '*.sys' -File -Recurse)
+          # Portable host drivers live directly in bin. Avoid recursive traversal.
+          $drivers = @(Get-ChildItem -LiteralPath $binOut -Filter '*.sys' -File)
+          Write-Host "Found $($drivers.Count) driver(s): $(($drivers.Name) -join ', ')"
           if ($drivers.Count -eq 0) { throw 'No kernel drivers (.sys) found in build output' }
           if (-not (Test-Path -LiteralPath (Join-Path $binOut 'VBoxSup.sys'))) {
             throw 'VBoxSup.sys is required for host runtime'
           }
 
-          $kitBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-          $signTool = Get-ChildItem -Path $kitBin -Recurse -Filter 'signtool.exe' -File |
-            Where-Object { $_.FullName -match '[\\/]x64[\\/]signtool\.exe$' } |
-            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host 'SIGN-PHASE 2/5: Locate SignTool (no recursive SDK scan)'
+          # Installed SDK is advertised by the MSVC environment on windows-2022.
+          $signTool = $null
+          if ($env:WindowsSdkVerBinPath) {
+            $candidate = Join-Path $env:WindowsSdkVerBinPath 'x64\signtool.exe'
+            Write-Host "Checking SDK tool: $candidate"
+            if (Test-Path -LiteralPath $candidate) { $signTool = $candidate }
+          }
+          if (-not $signTool) {
+            $kitBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $versions = @(Get-ChildItem -LiteralPath $kitBin -Directory |
+              Where-Object { $_.Name -match '^10\.0\.\d+\.\d+$' } |
+              Sort-Object Name -Descending)
+            foreach ($version in $versions) {
+              $candidate = Join-Path $version.FullName 'x64\signtool.exe'
+              if (Test-Path -LiteralPath $candidate) { $signTool = $candidate; break }
+            }
+          }
           if (-not $signTool) { throw 'Windows SDK signtool.exe x64 not found' }
+          Write-Host "Using SignTool: $signTool"
 
+          Write-Host 'SIGN-PHASE 3/5: Create development certificate'
           $cert = New-SelfSignedCertificate -Subject 'CN=VBoxCI-Ephemeral-TestSigning' `
             -Type CodeSigningCert -KeyAlgorithm RSA -KeyLength 3072 `
             -HashAlgorithm SHA256 -KeyUsage DigitalSignature `
@@ -403,9 +423,11 @@ jobs:
           if (-not $cert) { throw 'Unable to create development code signing certificate' }
           $publicCert = Join-Path $binOut 'VBoxCI-TestSigning.cer'
           Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
+          Write-Host "Certificate created: $($cert.Thumbprint)"
           # Trust on this ephemeral CI runner strictly for signature verification.
           Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
           Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+          Write-Host 'SIGN-PHASE 4/5: Sign and verify drivers'
           try {
             foreach ($driver in $drivers) {
               Write-Host "Signing: $($driver.FullName)"
@@ -425,6 +447,7 @@ jobs:
             Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue
           }
+          Write-Host 'SIGN-PHASE 5/5: Write signing metadata'
           @(
             'DEVELOPMENT TEST SIGNATURE ONLY'
             'Not Microsoft WHQL or attestation signed.'
@@ -433,6 +456,7 @@ jobs:
             'Test-signed kernel drivers require an appropriately configured isolated test host.'
             'Secure Boot and Windows kernel driver signing policy still apply.'
           ) | Set-Content -LiteralPath (Join-Path $binOut 'TEST-SIGNING-README.txt')
+          Write-Host 'SIGN-COMPLETE: All listed .sys files signed and verified.'
 
       - name: Generate build identity manifest
         shell: pwsh
