@@ -87,6 +87,14 @@ function Get-CloakScalarCanonical {
         if ($Value) { return 'true' }
         return 'false'
     }
+    # PowerShell 7 ConvertFrom-Json tu dong doi chuoi ISO-8601 thanh DateTime;
+    # phai canonical hoa de khong bi coi la bang nhau (null).
+    if ($Value -is [datetime]) {
+        return $Value.ToUniversalTime().ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -is [System.DateTimeOffset]) {
+        return $Value.UtcDateTime.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
     if ($Value -is [int] -or $Value -is [long] -or $Value -is [double] -or $Value -is [decimal] -or $Value -is [single]) {
         return [System.Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture)
     }
@@ -467,7 +475,8 @@ function Get-CloakSelfTestReference {
     "manufacturer": "OEM Systems",
     "productName": "TestVM",
     "serialNumber": "VM0001",
-    "acpiOemId": "VBOX"
+    "acpiOemId": "VBOX",
+    "releaseDate": "2026-01-01T00:00:00Z"
   },
   "cpuid": {
     "leaves": [
@@ -566,7 +575,9 @@ function Assert-CloakSelfTestThrows {
 }
 
 function Invoke-CloakSelfTest {
-    $Base = Get-CloakSelfTestReference
+    # Normalize line endings: CI checkout can be CRLF while the added-device
+    # self-test pattern below contains a newline.
+    $Base = (Get-CloakSelfTestReference) -replace "`r`n", "`n"
 
     Assert-CloakSelfTest -Name 'identical documents match' -ReferenceJson $Base -CandidateJson $Base `
         -ExpectMatch $true -ExpectDifferences 0 -ExpectVolatile 0
@@ -588,6 +599,10 @@ function Invoke-CloakSelfTest {
     $SessionOnly = $Base.Replace('"sessionId": 42', '"sessionId": 43')
     Assert-CloakSelfTest -Name 'session id is volatile' -ReferenceJson $Base -CandidateJson $SessionOnly `
         -ExpectMatch $true -ExpectDifferences 0 -ExpectVolatile 1
+
+    $DateChanged = $Base.Replace('"releaseDate": "2026-01-01T00:00:00Z"', '"releaseDate": "2026-01-02T00:00:00Z"')
+    Assert-CloakSelfTest -Name 'date-formatted field change fails' -ReferenceJson $Base -CandidateJson $DateChanged `
+        -ExpectMatch $false -ExpectDifferences 1 -ExpectVolatile 0 -ExpectPathLike '.releaseDate'
 
     $HexCase = $Base.Replace('"vendorId": "80EE"', '"vendorId": "80ee"')
     Assert-CloakSelfTest -Name 'hex case is canonical' -ReferenceJson $Base -CandidateJson $HexCase `

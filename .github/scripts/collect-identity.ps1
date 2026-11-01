@@ -113,19 +113,23 @@ Write-Step "Using VBoxManage: $script:VBoxManage"
 # ---------------------------------------------------------------------------
 # 0. Kiem tra co the chay VM that khong
 #
-# VirtualBox tren Windows can VBoxDrv (kernel driver) + nested virtualization
-# (VT-x) de chay may ao. GitHub-hosted runner KHONG co ca hai:
-#   - VBoxDrv chua duoc cai -> "VERR_VM_DRIVER_NOT_INSTALLED"
+# VirtualBox tren Windows can VBoxSup (kernel support driver). Build portable
+# non-hardened co the nap VBoxSup.sys ngay canh VBoxManage.exe; ban cai dat chuan
+# co the dat driver trong System32\drivers.
+#   - VBoxSup chua co/khong nap duoc -> "VERR_VM_DRIVER_NOT_INSTALLED"
 #   - Azure runner khong expose nested virtualization
 # => Phase 1 (capture runtime) chi chay khi co runtime target.
 # ---------------------------------------------------------------------------
 function Test-RuntimeAvailable {
-    $driver = Join-Path $env:SystemRoot 'System32\drivers\VBoxDrv.sys'
-    if (Test-Path -LiteralPath $driver) { return $true }
+    $portableDriver = Join-Path $VBoxDir 'VBoxSup.sys'
+    $systemDriver = Join-Path $env:SystemRoot 'System32\drivers\VBoxSup.sys'
+    if (Test-Path -LiteralPath $portableDriver) { return $true }
+    if (Test-Path -LiteralPath $systemDriver) { return $true }
 
-    # Da dang ky service?
-    $svc = Get-Service -Name 'VBoxDrv' -ErrorAction SilentlyContinue
-    if ($svc) { return $true }
+    # Service dang RUNNING cung la runtime target hop le. Khong coi service
+    # STOPPED don thuan la du: ImagePath co the tro toi thu muc cu da bi xoa.
+    $svc = Get-Service -Name 'VBoxSup' -ErrorAction SilentlyContinue
+    if ($svc -and $svc.Status -eq 'Running') { return $true }
 
     return $false
 }
@@ -133,18 +137,18 @@ function Test-RuntimeAvailable {
 $runtimeAvailable = Test-RuntimeAvailable
 if (-not $runtimeAvailable) {
     Write-Host 'RUNTIME_TARGET_UNAVAILABLE' -ForegroundColor Yellow
-    Write-Host '  - VBoxDrv (kernel driver) chua duoc cai tren may nay' -ForegroundColor Yellow
+    Write-Host '  - VBoxSup.sys khong co trong VBoxDir/System32 va service VBoxSup khong RUNNING' -ForegroundColor Yellow
     Write-Host '  - runner nay cung khong co nested virtualization' -ForegroundColor Yellow
     if ($RequireRuntime) {
         Write-Host 'ERROR: -RequireRuntime duoc dat nhung khong co runtime target.' -ForegroundColor Red
         exit 3
     }
     Write-Host '  -> BO QUA phase capture runtime (khong phai loi).' -ForegroundColor Yellow
-    Write-Host '  -> De verify identity that runtime, hay chay script nay tren may co VBoxDrv' -ForegroundColor Yellow
+    Write-Host '  -> De verify identity that runtime, hay chay script nay tren may co VBoxSup' -ForegroundColor Yellow
     Write-Host '     (hoac tren self-hosted runner / VM local).' -ForegroundColor Yellow
 }
 else {
-    Write-Step 'Runtime target available (VBoxDrv present).'
+    Write-Step 'Runtime target available (VBoxSup present/running).'
 }
 
 # ---------------------------------------------------------------------------

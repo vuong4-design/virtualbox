@@ -1128,7 +1128,7 @@ Lib\win7\km\x64                Lib\win8\km\x64
 | 0.4.2 | Thêm job `full-additions` + WDK | `.github/workflows/build.yml` + `.github/scripts/install-wdk.ps1` | ✅ **đã làm** | Xem [§4.7.5](#475-bổ-sung-job-full-additions-guest-additions--wdk) |
 | 0.4.3 | T3 self-hosted runner + VM có disk | runner + `.github/workflows/build.yml` | 🟡 **một phần** | Job `t3-runtime` (gated: dispatch `run_t3` + biến `CLOAK_T3_ENABLED`) + `.github/scripts/t3-runtime.ps1` (self-test xanh trong `smoke`); fail exit 3 nếu thiếu `VBoxDrv`/VT-x; **chờ runner O8** |
 | 0.4.3a | Guest collector Windows + Linux | `.github/scripts/collect-guest-identity.ps1/.sh` | 🟡 **một phần** | Script Windows/Linux viết xong theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 (0.4.3) |
-| 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 14 case (self-test xanh trong `smoke`); chưa ghép job T3 |
+| 0.4.3b | Schema comparator + negative tests | `.github/scripts/compare-identity.ps1` | 🟡 **một phần** | Comparator + self-test 15 case (xanh trong `smoke`); comparator được gọi bởi `t3-runtime.ps1` (job `t3-runtime` gated); capture thật chờ runner O8 |
 | 0.4.3c | T3 3 boot + saved-state/snapshot test | T3 job | 🟡 **một phần** | `t3-runtime.ps1` có `stateTest` (§4.6.5): save-state→resume + snapshot→restore so baseline (fail nếu khác), 2 negative test đổi seed/seed-hash kỳ vọng bị từ chối; self-test xanh trong `smoke`; capture thật chờ runner O8 + guard `1.0.12` |
 | 0.4.4 | Gate T3 trên PR-2/PR-3/PR-6 | `.github/workflows/build.yml` | ⬜ **chưa làm** | Không có T3 xanh → không merge thay đổi identity |
 | 0.4.5 | T3 artifact isolation/redaction | T3 job + script | 🟡 **một phần** | `t3-runtime.ps1` audit redaction trước publish (chỉ quét đúng tập file upload: report + guest-compare; bắt 64-hex seed/hash, key ExtraData, marker bí mật → exit 2); job T3 có step audit `if: always()`, upload chỉ chạy khi audit xanh; self-test + smoke mode xanh; chờ runner O8 để chạy thật |
@@ -1537,6 +1537,24 @@ $query = 'SELECT `Value` FROM `Property` WHERE `Property`=''ProductName'''
 Đã sửa. (Dù không sửa thì script vẫn chạy được nhờ fallback "cài tất cả MSI", nhưng sẽ tải
 thêm gói debugger ~1.5 GB.)
 
+##### Lỗi L — `smoke`: comparator self-test fail trên `pwsh` (PowerShell 7)
+
+```
+FAIL [volatile fields only pass] expected 3 volatile differences, got 2
+FAIL [added PCI device fails] expected match=False, got match=True
+```
+
+**Nguyên nhân (2 lỗi độc lập, chỉ lộ trên CI):**
+
+1. PowerShell 7 `ConvertFrom-Json` tự đổi chuỗi ISO-8601 thành `[DateTime]`; `Get-CloakScalarCanonical`
+   không xử lý `DateTime` → trả `$null` → `timestamp` bị coi là bằng nhau. (PS 5.1 giữ string nên local xanh.)
+2. CI checkout dùng CRLF; self-test "added PCI device" chèn thiết bị bằng pattern có newline
+   → `.Replace()` không khớp trên CRLF.
+
+**Fix:** canonical hoá `[DateTime]`/`[DateTimeOffset]` (UTC, format `o`, invariant) trong
+`Get-CloakScalarCanonical`; normalize CRLF→LF cho self-test reference; thêm case hồi quy
+"date-formatted field change fails" (15 case). Đã verify cả 4 tổ hợp pwsh 7.4.6 / PS 5.1 × LF / CRLF.
+
 ##### Quy tắc rút ra cho mọi script CI
 
 | Quy tắc | Lý do |
@@ -1546,6 +1564,8 @@ thêm gói debugger ~1.5 GB.)
 | Bọc mọi lời gọi native bằng try/catch + tắt `$ErrorActionPreference` tạm thời | `2>&1` + `EAP=Stop` → terminating error |
 | Luôn có `-TimeoutSeconds` cho process con | Không muốn job treo hàng giờ |
 | Luôn upload log chẩn đoán (`if: always()`) | Không đọc được log của job đang chạy |
+| Canonical hoá `[DateTime]`/`[DateTimeOffset]` khi so JSON | PowerShell 7 tự parse ISO-8601 → DateTime; `$null` canonical làm mất khác biệt |
+| Self-test không phụ thuộc line ending (normalize CRLF→LF) | CI checkout CRLF, local LF |
 
 
 
@@ -2049,7 +2069,7 @@ Chỉ bắt đầu code identity khi:
 | Mã nguồn VirtualBox (`src/`) | PR-1 đã có: `ConsoleImplConfigCloak.*` (MPE, seed, state guard, saved-state, build manifest), `tstCloakConfig.cpp`, `Makefile.kmk` (`VBOX_WITH_CLOAK_BUILD`); identity guest-visible không đổi; CI build + chạy `tstCloakConfig` trong job `build` (override `VBOX_WITH_TESTCASES=1`, chỉ target testcase) |
 | `.github/workflows/build.yml` | Đã commit; job `build`, `full-additions`, `smoke`, `t3-runtime` (gated); build sinh `build-identity.json`; build + chạy `tstCloakConfig` (testcase trong job `build`); smoke verify manifest + header generator + comparator + guest collector + T3 orchestrator self-test |
 | `.github/scripts/verify-manifest.ps1`, `CloakManifest.psm1`, `generate-build-identity.ps1`, `generate-build-identity-header.ps1` | Verify/sinh manifest stock+cloak và header nhúng; fixture `testdata/build-identity.cloak.json` |
-| `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 14 case; pair array theo `bdf/leaf/mac/...`; chưa ghép job T3 |
+| `.github/scripts/compare-identity.ps1` | Schema comparator §4.7.4.1 + self-test 15 case; pair array theo `bdf/leaf/mac/...`; gọi từ `t3-runtime.ps1` (job `t3-runtime` gated) |
 | `.github/scripts/collect-guest-identity.ps1`, `collect-guest-identity.sh` | Guest collector Windows/Linux theo schema §4.7.4.1; `-SelfTest`/`--self-test` xanh trong `smoke`; capture thật chờ runner T3 |
 | `.github/scripts/collect-identity.ps1` | Host-side `debugvm`; **chưa phải T3** (không guest collector, chỉ 2 run, mask hex). T3 dùng `t3-runtime.ps1` (3 boot + comparator); chờ runner O8 |
 | `.github/scripts/t3-runtime.ps1`, `testdata/t3-config.sample.json` | T3 orchestrator: N boot/guest, host `debugvm` + guest JSON qua `fetchCommand`, comparator §4.7.4.1, report redacted; `stateTest` (§4.6.5: save-state/snapshot restore + negative seed-mismatch); audit redaction artifact (0.4.5, `-AuditArtifacts`); `-CheckRuntime` bring-up runner (VBoxManage + VBoxDrv/VT-x + VM/seed nếu có config); `-SelfTest`/`-ValidateConfig` xanh trong `smoke`; chờ runner O8 |

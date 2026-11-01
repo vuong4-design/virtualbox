@@ -3,7 +3,7 @@
     Quet cac chuoi identity trong binary da build, lam "baseline" de so sanh giua 2 commit.
 
 .DESCRIPTION
-    Khong the chay VM (GitHub runner khong co VBoxDrv / nested virtualization),
+    Khong the chay VM (GitHub runner khong co VBoxSup / backend virtualization phu hop),
     nen phan capture runtime duoc bo qua. Phan nay quet truc tiep cac file da
     build xem co chuoi identity nao xuat hien - dung de:
       * xac nhan patch da bien dich vao binary

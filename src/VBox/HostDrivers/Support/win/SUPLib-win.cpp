@@ -590,6 +590,49 @@ static int suplibOsUpdateService(void)
 }
 #endif
 
+/**
+ * Updates an existing non-hardened VBoxSup service to use the driver next to
+ * the currently running executable.  Development builds are often moved after
+ * extraction, so keeping a stale ImagePath can make Windows load VBoxSup.sys
+ * from an older build directory.
+ */
+static int suplibOsRefreshServicePath(void)
+{
+    char szDriver[RTPATH_MAX];
+    int rc = RTPathExecDir(szDriver, sizeof(szDriver) - sizeof("\\VBoxSup.sys"));
+    if (RT_FAILURE(rc))
+        return rc;
+    strcat(szDriver, "\\VBoxSup.sys");
+    if (!RTPathExists(szDriver))
+        return VERR_FILE_NOT_FOUND;
+
+    SC_HANDLE hSMgr = OpenSCManager(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!hSMgr)
+        return RTErrConvertFromWin32(GetLastError());
+
+    SC_HANDLE hService = OpenService(hSMgr, SERVICE_NAME, SERVICE_CHANGE_CONFIG);
+    if (!hService)
+    {
+        rc = RTErrConvertFromWin32(GetLastError());
+        CloseServiceHandle(hSMgr);
+        return rc;
+    }
+
+    if (!ChangeServiceConfig(hService,
+                             SERVICE_NO_CHANGE,
+                             SERVICE_DEMAND_START,
+                             SERVICE_ERROR_NORMAL,
+                             szDriver,
+                             NULL, NULL, NULL, NULL, NULL, NULL))
+        rc = RTErrConvertFromWin32(GetLastError());
+    else
+        rc = VINF_SUCCESS;
+
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSMgr);
+    return rc;
+}
+
 
 /**
  * Attempts to start the service, creating it if necessary.
@@ -649,6 +692,15 @@ static int suplibOsStartService(void)
                 rc = VINF_SUCCESS;
             else
             {
+                /*
+                 * Development builds may have been moved since VBoxSup was
+                 * registered. Refresh the service path before starting it so
+                 * we do not keep loading a stale VBoxSup.sys from an old tree.
+                 */
+                int rcRefresh = suplibOsRefreshServicePath();
+                if (RT_FAILURE(rcRefresh))
+                    LogRel(("SUP: Failed to refresh VBoxSup service path, rc=%Rrc; trying existing configuration.\n", rcRefresh));
+
                 /*
                  * Start it.
                  */

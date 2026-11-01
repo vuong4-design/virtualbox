@@ -3,7 +3,7 @@
     T3 — kiểm chứng runtime identity trên self-hosted runner (kế hoạch §4.7.4).
 
 .DESCRIPTION
-    Script chạy trên máy self-hosted Windows có VBoxDrv + VT-x. Với mỗi guest VM
+    Script chạy trên máy self-hosted Windows có VBoxSup + VT-x/AMD-V hoặc Hyper-V. Với mỗi guest VM
     (Windows/Linux) trong file cấu hình:
 
         boot N lần (mặc định 3) trên cùng VM:
@@ -15,7 +15,7 @@
           - host: fingerprint text (chuẩn hoá; mask địa chỉ hex dài - volatile)
           - guest: schema comparator §4.7.4.1 (compare-identity.ps1)
 
-    Không fallback sang hosted runner: thiếu VBoxDrv/VT-x -> exit 3 (fail).
+    Không fallback sang hosted runner: thiếu VBoxSup hoặc backend ảo hóa -> exit 3 (fail).
     "No bootable device" không phải T3: collector phải chạy được trong guest.
 
     Nếu config bật `stateTest` (§4.6.5), sau các boot cold còn chạy thêm:
@@ -50,7 +50,7 @@
     (dùng trong job T3 trước bước upload; không cần VM).
 
 .PARAMETER CheckRuntime
-    Chỉ kiểm tra runner đã sẵn sàng chạy T3 rồi thoát: VBoxManage + VBoxDrv/VT-x,
+    Chỉ kiểm tra runner đã sẵn sàng chạy T3 rồi thoát: VBoxManage + VBoxSup + backend ảo hóa,
     và nếu có ConfigPath thì thêm VM đã đăng ký + seed/hash đã provision đúng.
     Dùng khi bring-up runner self-hosted (O8); không boot VM.
 
@@ -59,7 +59,7 @@
         0 = identity ổn định qua N boot (host + toàn bộ guest)
         1 = có khác biệt identity
         2 = lỗi cấu hình/thực thi
-        3 = runtime target không khả dụng (VBoxDrv/VT-x)
+        3 = runtime target không khả dụng (VBoxSup/backend ảo hóa)
 
     Khóa config tùy chọn:
         runs                   số boot cold (2..10, mặc định 3)
@@ -210,19 +210,21 @@ function Expand-T3Arguments {
 # Preflight — thieu runtime phai fail (CI-14), khong duoc skip
 # ---------------------------------------------------------------------------
 function Assert-T3RuntimeAvailable {
-    $driver = Join-Path $env:SystemRoot 'System32\drivers\VBoxDrv.sys'
-    $hasDriver = (Test-Path -LiteralPath $driver)
+    $portableDriver = Join-Path $VBoxDir 'VBoxSup.sys'
+    $systemDriver = Join-Path $env:SystemRoot 'System32\drivers\VBoxSup.sys'
+    $service = Get-Service -Name 'VBoxSup' -ErrorAction SilentlyContinue
+
+    $hasDriver = (Test-Path -LiteralPath $portableDriver) -or
+                 (Test-Path -LiteralPath $systemDriver) -or
+                 ($null -ne $service -and $service.Status -eq 'Running')
     if (-not $hasDriver) {
-        $service = Get-Service -Name 'VBoxDrv' -ErrorAction SilentlyContinue
-        if ($null -ne $service) { $hasDriver = $true }
-    }
-    if (-not $hasDriver) {
-        Write-ErrorLine 'RUNTIME_TARGET_UNAVAILABLE: VBoxDrv (kernel driver) not installed.'
+        Write-ErrorLine 'RUNTIME_TARGET_UNAVAILABLE: VBoxSup.sys not found in VBoxDir/System32 and VBoxSup is not running.'
         exit 3
     }
 
     $hasVtX = $false
-    $cimError = ''
+    $hasHypervisor = $false
+    $cimErrors = [System.Collections.Generic.List[string]]::new()
     try {
         $cpu = Get-CimInstance -ClassName 'Win32_Processor' -ErrorAction Stop | Select-Object -First 1
         if ($null -ne $cpu) {
@@ -231,14 +233,22 @@ function Assert-T3RuntimeAvailable {
         }
     }
     catch {
-        $cimError = $_.Exception.Message
+        $cimErrors.Add($_.Exception.Message)
     }
-    if (-not $hasVtX) {
-        Write-ErrorLine "RUNTIME_TARGET_UNAVAILABLE: VT-x/AMD-V not detected (Win32_Processor). $cimError"
+    try {
+        $computer = Get-CimInstance -ClassName 'Win32_ComputerSystem' -ErrorAction Stop
+        if ($null -ne $computer -and $computer.HypervisorPresent -eq $true) { $hasHypervisor = $true }
+    }
+    catch {
+        $cimErrors.Add($_.Exception.Message)
+    }
+
+    if (-not $hasVtX -and -not $hasHypervisor) {
+        Write-ErrorLine "RUNTIME_TARGET_UNAVAILABLE: neither VT-x/AMD-V nor Hyper-V hypervisor detected. $($cimErrors -join '; ')"
         exit 3
     }
 
-    Write-Step 'Runtime target available (VBoxDrv + VT-x/AMD-V).'
+    Write-Step 'Runtime target available (VBoxSup + virtualization backend).'
 }
 
 # ---------------------------------------------------------------------------

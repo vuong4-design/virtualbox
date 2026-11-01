@@ -354,8 +354,85 @@ jobs:
             Write-Warning "VirtualBox.exe was not generated! Listing existing .exe files:";
           }
 
+          # Artifact này được chạy trực tiếp (không qua MSI), nên host runtime
+          # payload phải đi cùng một build. Thiếu một file ở đây sẽ dẫn tới
+          # VERR_VM_DRIVER_NOT_INSTALLED hoặc service trỏ sang driver build khác.
+          $requiredHostRuntime = @(
+            "VBoxSup.sys",
+            "VBoxSup.inf",
+            "SUPInstall.exe",
+            "SUPUninstall.exe"
+          );
+          foreach ($name in $requiredHostRuntime) {
+            $path = "$binOut\$name";
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing required host runtime payload: $path";
+            }
+            Write-Host "HOST-RUNTIME OK: $path";
+          }
+
           Write-Host "=== Generated Executables (.exe) ===";
           Get-ChildItem -Path $binOut -Filter "*.exe" | Select-Object Name, Length;
+
+      # Development-only signing. This is NOT a Microsoft attestation/WHQL signature.
+      # Each CI run gets a different short-lived private key, which stays in the
+      # runner's certificate store. Only the PUBLIC .cer is put in the artifact.
+      - name: Test-sign Windows kernel drivers
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binOut = (Resolve-Path 'out/win.amd64/release/bin').Path
+          $drivers = @(Get-ChildItem -LiteralPath $binOut -Filter '*.sys' -File -Recurse)
+          if ($drivers.Count -eq 0) { throw 'No kernel drivers (.sys) found in build output' }
+          if (-not (Test-Path -LiteralPath (Join-Path $binOut 'VBoxSup.sys'))) {
+            throw 'VBoxSup.sys is required for host runtime'
+          }
+
+          $kitBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          $signTool = Get-ChildItem -Path $kitBin -Recurse -Filter 'signtool.exe' -File |
+            Where-Object { $_.FullName -match '[\\/]x64[\\/]signtool\.exe$' } |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $signTool) { throw 'Windows SDK signtool.exe x64 not found' }
+
+          $cert = New-SelfSignedCertificate -Subject 'CN=VBoxCI-Ephemeral-TestSigning' `
+            -Type CodeSigningCert -KeyAlgorithm RSA -KeyLength 3072 `
+            -HashAlgorithm SHA256 -KeyUsage DigitalSignature `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -NotAfter (Get-Date).AddDays(30)
+          if (-not $cert) { throw 'Unable to create development code signing certificate' }
+          $publicCert = Join-Path $binOut 'VBoxCI-TestSigning.cer'
+          Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
+          # Trust on this ephemeral CI runner strictly for signature verification.
+          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+          try {
+            foreach ($driver in $drivers) {
+              Write-Host "Signing: $($driver.FullName)"
+              & $signTool sign /v /fd SHA256 /sha1 $cert.Thumbprint /s My $driver.FullName
+              if ($LASTEXITCODE -ne 0) { throw "SignTool failed to sign $($driver.FullName)" }
+              $signature = Get-AuthenticodeSignature -LiteralPath $driver.FullName
+              if ($signature.Status -ne 'Valid' -or
+                  $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+                throw "Driver signature check failed: $($driver.Name), status=$($signature.Status)"
+              }
+              Write-Host "SIGNED OK: $($driver.Name)"
+            }
+          }
+          finally {
+            # No private key is exported into the artifact.
+            Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPublisher\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue
+          }
+          @(
+            'DEVELOPMENT TEST SIGNATURE ONLY'
+            'Not Microsoft WHQL or attestation signed.'
+            'Do not use on production Windows hosts.'
+            'Each CI artifact has a separate test certificate (VBoxCI-TestSigning.cer).'
+            'Test-signed kernel drivers require an appropriately configured isolated test host.'
+            'Secure Boot and Windows kernel driver signing policy still apply.'
+          ) | Set-Content -LiteralPath (Join-Path $binOut 'TEST-SIGNING-README.txt')
 
       - name: Generate build identity manifest
         shell: pwsh
