@@ -421,30 +421,39 @@ jobs:
             -CertStoreLocation 'Cert:\CurrentUser\My' `
             -NotAfter (Get-Date).AddDays(30)
           if (-not $cert) { throw 'Unable to create development code signing certificate' }
-          $publicCert = Join-Path $binOut 'VBoxCI-TestSigning.cer'
-          Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
           Write-Host "Certificate created: $($cert.Thumbprint)"
-          # Trust on this ephemeral CI runner strictly for signature verification.
-          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
-          Import-Certificate -FilePath $publicCert -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
-          Write-Host 'SIGN-PHASE 4/5: Sign and verify drivers'
+          $publicCert = Join-Path $binOut 'VBoxCI-TestSigning.cer'
+          Write-Host "Exporting public certificate: $publicCert"
+          Export-Certificate -Cert $cert -FilePath $publicCert | Out-Null
+          Write-Host 'Public certificate exported; skipping trust-store imports on CI runner'
+          # Import-Certificate into Root may show an interactive trust prompt on
+          # hosted Windows runners and hang indefinitely. Trust is needed only
+          # on an explicitly configured, isolated test machine, not to sign.
+          Write-Host 'SIGN-PHASE 4/5: Sign and inspect embedded driver signatures'
           try {
             foreach ($driver in $drivers) {
               Write-Host "Signing: $($driver.FullName)"
               & $signTool sign /v /fd SHA256 /sha1 $cert.Thumbprint /s My $driver.FullName
               if ($LASTEXITCODE -ne 0) { throw "SignTool failed to sign $($driver.FullName)" }
               $signature = Get-AuthenticodeSignature -LiteralPath $driver.FullName
-              if ($signature.Status -ne 'Valid' -or
-                  $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
-                throw "Driver signature check failed: $($driver.Name), status=$($signature.Status)"
+              # A self-signed test certificate is intentionally untrusted in CI.
+              # Some Windows builds report an untrusted chain as UnknownError.
+              # Only allow that status when the error explicitly identifies trust.
+              $untrustedChain = $signature.Status -eq 'NotTrusted' -or (
+                $signature.Status -eq 'UnknownError' -and
+                $signature.StatusMessage -match '(?i)not trusted|untrusted root|0x800b0109|0x800b010a'
+              )
+              if (-not $signature.SignerCertificate -or
+                  $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint -or
+                  ($signature.Status -ne 'Valid' -and -not $untrustedChain)) {
+                throw "Driver signature check failed: $($driver.Name), status=$($signature.Status), message=$($signature.StatusMessage), signer=$($signature.SignerCertificate.Thumbprint)"
               }
-              Write-Host "SIGNED OK: $($driver.Name)"
+              Write-Host "SIGNED OK: $($driver.Name) (local trust status: $($signature.Status))"
             }
           }
           finally {
+            Write-Host 'Removing ephemeral signing key from the CI certificate store'
             # No private key is exported into the artifact.
-            Remove-Item -LiteralPath "Cert:\CurrentUser\TrustedPublisher\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($cert.Thumbprint)" -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue
           }
           Write-Host 'SIGN-PHASE 5/5: Write signing metadata'
@@ -453,6 +462,8 @@ jobs:
             'Not Microsoft WHQL or attestation signed.'
             'Do not use on production Windows hosts.'
             'Each CI artifact has a separate test certificate (VBoxCI-TestSigning.cer).'
+            'The public test certificate is NOT trusted automatically by the CI runner or deployment PC.'
+            'Get-AuthenticodeSignature may show NotTrusted (not NotSigned) until the test cert is trusted.'
             'Test-signed kernel drivers require an appropriately configured isolated test host.'
             'Secure Boot and Windows kernel driver signing policy still apply.'
           ) | Set-Content -LiteralPath (Join-Path $binOut 'TEST-SIGNING-README.txt')
