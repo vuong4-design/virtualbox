@@ -4875,7 +4875,7 @@ static int rtldrPEValidateDirectoriesAndRememberStuff(PRTLDRMODPE pModPe, const 
             Log(("rtldrPEOpen: %s: load cfg dir: Unexpected bytes are non-zero (%u bytes of which %u expected to be zero): %.*Rhxs\n",
                  pszLogName, Dir.Size, Dir.Size - cbMaxKnown, Dir.Size - cbMaxKnown, &u.abZeros[cbMaxKnown]));
             return RTErrInfoSetF(pErrInfo, VERR_LDRPE_LOAD_CONFIG_SIZE,
-                                 "Grown load config (%u to %u bytes) includes non-zero bytes: %.*Rhxs",
+                                 "VBOX_PE_LOADER_V15_0x148: Grown load config (%u to %u bytes) includes non-zero bytes: %.*Rhxs",
                                  cbMaxKnown, Dir.Size, Dir.Size - cbMaxKnown, &u.abZeros[cbMaxKnown]);
         }
         if (!pModPe->f64Bit)
@@ -4926,7 +4926,7 @@ static int rtldrPEValidateDirectoriesAndRememberStuff(PRTLDRMODPE pModPe, const 
                     Log(("rtldrPEOpen: %s: load cfg dir: Unknown bytes are non-zero (%u bytes of which %u expected to be zero): %.*Rhxs\n",
                          pszLogName, Dir.Size, Dir.Size - cbMaxKnown, Dir.Size - cbMaxKnown, &u.abZeros[cbMaxKnown]));
                     return RTErrInfoSetF(pErrInfo, VERR_LDRPE_LOAD_CONFIG_SIZE,
-                                         "Grown load config (%u to %u bytes, dir %u) includes non-zero bytes: %.*Rhxs",
+                                         "VBOX_PE_LOADER_V15_0x148: Grown load config (%u to %u bytes, dir %u) includes non-zero bytes: %.*Rhxs",
                                          cbMaxKnown, Dir.Size, uOrgDir, Dir.Size - cbMaxKnown, &u.abZeros[cbMaxKnown]);
                 }
                 if (!pModPe->f64Bit)

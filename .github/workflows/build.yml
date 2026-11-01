@@ -374,23 +374,29 @@ jobs:
           Write-Host "=== Generated Executables (.exe) ===";
           Get-ChildItem -Path $binOut -Filter "*.exe" | Select-Object Name, Length;
 
-      # Development-only signing. This is NOT a Microsoft attestation/WHQL signature.
+      # Development-only signing of host .sys AND kernel R0 modules (.r0).
+      # Windows native R0 loading also enforces Code Integrity; signing .sys alone
+      # cannot fix STATUS_INVALID_IMAGE_HASH for an unsigned VMMR0.r0.
+      # This is NOT a Microsoft attestation/WHQL signature.
       # Each CI run gets a different short-lived private key, which stays in the
       # runner's certificate store. Only the PUBLIC .cer is put in the artifact.
-      - name: Test-sign Windows kernel drivers
+      - name: Test-sign Windows kernel drivers and R0 modules
         timeout-minutes: 8
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
-          Write-Host 'SIGN-PHASE 1/5: Locate host drivers'
+          Write-Host 'SIGN-PHASE 1/5: Locate host drivers and kernel R0 modules'
           $binOut = (Resolve-Path 'out/win.amd64/release/bin').Path
-          # Portable host drivers live directly in bin. Avoid recursive traversal.
-          $drivers = @(Get-ChildItem -LiteralPath $binOut -Filter '*.sys' -File)
-          Write-Host "Found $($drivers.Count) driver(s): $(($drivers.Name) -join ', ')"
-          if ($drivers.Count -eq 0) { throw 'No kernel drivers (.sys) found in build output' }
-          if (-not (Test-Path -LiteralPath (Join-Path $binOut 'VBoxSup.sys'))) {
-            throw 'VBoxSup.sys is required for host runtime'
+          # Both .sys drivers and .r0 PE modules may be subject to kernel Code Integrity.
+          # Scan the portable bin directly; do not traverse unrelated subdirectories.
+          $drivers = @(Get-ChildItem -LiteralPath $binOut -File |
+            Where-Object { $_.Extension -in @('.sys', '.r0') })
+          Write-Host "Found $($drivers.Count) kernel image(s): $(($drivers.Name) -join ', ')"
+          foreach ($required in @('VBoxSup.sys', 'VMMR0.r0')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $binOut $required))) {
+              throw "$required is required for host runtime"
+            }
           }
 
           Write-Host 'SIGN-PHASE 2/5: Locate SignTool (no recursive SDK scan)'
@@ -429,10 +435,10 @@ jobs:
           # Import-Certificate into Root may show an interactive trust prompt on
           # hosted Windows runners and hang indefinitely. Trust is needed only
           # on an explicitly configured, isolated test machine, not to sign.
-          Write-Host 'SIGN-PHASE 4/5: Sign and inspect embedded driver signatures'
+          Write-Host 'SIGN-PHASE 4/5: Sign and inspect embedded kernel image signatures'
           try {
             foreach ($driver in $drivers) {
-              Write-Host "Signing: $($driver.FullName)"
+              Write-Host "Signing kernel image: $($driver.FullName)"
               & $signTool sign /v /fd SHA256 /sha1 $cert.Thumbprint /s My $driver.FullName
               if ($LASTEXITCODE -ne 0) { throw "SignTool failed to sign $($driver.FullName)" }
               $signature = Get-AuthenticodeSignature -LiteralPath $driver.FullName
@@ -446,7 +452,7 @@ jobs:
               if (-not $signature.SignerCertificate -or
                   $signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint -or
                   ($signature.Status -ne 'Valid' -and -not $untrustedChain)) {
-                throw "Driver signature check failed: $($driver.Name), status=$($signature.Status), message=$($signature.StatusMessage), signer=$($signature.SignerCertificate.Thumbprint)"
+                throw "Kernel image signature check failed: $($driver.Name), status=$($signature.Status), message=$($signature.StatusMessage), signer=$($signature.SignerCertificate.Thumbprint)"
               }
               Write-Host "SIGNED OK: $($driver.Name) (local trust status: $($signature.Status))"
             }
@@ -464,10 +470,54 @@ jobs:
             'Each CI artifact has a separate test certificate (VBoxCI-TestSigning.cer).'
             'The public test certificate is NOT trusted automatically by the CI runner or deployment PC.'
             'Get-AuthenticodeSignature may show NotTrusted (not NotSigned) until the test cert is trusted.'
-            'Test-signed kernel drivers require an appropriately configured isolated test host.'
+            'Kernel .sys drivers AND .r0 modules are test-signed by this workflow.'
+            'Test-signed kernel images require an appropriately configured isolated test host.'
             'Secure Boot and Windows kernel driver signing policy still apply.'
           ) | Set-Content -LiteralPath (Join-Path $binOut 'TEST-SIGNING-README.txt')
-          Write-Host 'SIGN-COMPLETE: All listed .sys files signed and verified.'
+          Write-Host 'SIGN-COMPLETE: All listed .sys and .r0 files test-signed and inspected.'
+
+      # Prevent portable artifacts containing an outdated PE loader or wrong run.
+      - name: Verify PE V15 runtime and stamp portable provenance
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binOut = (Resolve-Path 'out/win.amd64/release/bin').Path
+          $sha = (git rev-parse HEAD).Trim()
+          $expectedSha = '${{ github.sha }}'
+          if ($sha -ne $expectedSha) { throw "Checkout mismatch: git=$sha workflow=$expectedSha" }
+          $loaderSource = Get-Content 'src/VBox/Runtime/common/ldr/ldrPE.cpp' -Raw
+          if (-not $loaderSource.Contains('const size_t cbMaxKnown = cbExpectV15;')) {
+            throw 'PE V15 fix is missing from checked-out source'
+          }
+          $marker = 'VBOX_PE_LOADER_V15_0x148'
+          $runtime = Join-Path $binOut 'VBoxRT.dll'
+          if (-not (Test-Path -LiteralPath $runtime)) { throw "Missing runtime library: $runtime" }
+          Write-Host "Checking built runtime: $runtime"
+          # Verify the compiled DLL, not just the source tree. No recursive scan.
+          $runtimeText = [System.Text.Encoding]::Latin1.GetString([System.IO.File]::ReadAllBytes($runtime))
+          if (-not $runtimeText.Contains($marker)) {
+            throw 'VBoxRT.dll does not contain PE V15 marker: stale/mismatched binary'
+          }
+          Write-Host "RUNTIME-PE-V15 OK: marker $marker is present in VBoxRT.dll"
+          $requiredFiles = @('VirtualBox.exe', 'VBoxRT.dll', 'VMMR0.r0', 'VBoxSup.sys')
+          $provenance = @(
+            "source_sha=$sha"
+            "github_run_id=${{ github.run_id }}"
+            "github_run_attempt=${{ github.run_attempt }}"
+            "source_ref=${{ github.ref_name }}"
+            "pe_loader_marker=$marker"
+          )
+          foreach ($name in $requiredFiles) {
+            $file = Join-Path $binOut $name
+            if (-not (Test-Path -LiteralPath $file)) { throw "Missing core portable file: $file" }
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            $provenance += "sha256.$name=$hash"
+            Write-Host "PROVENANCE: $name sha256=$hash"
+          }
+          $provenance | Set-Content -LiteralPath (Join-Path $binOut 'VBOX-PORTABLE-BUILD.txt') -Encoding utf8
+          Copy-Item -LiteralPath 'source-revision.txt' -Destination (Join-Path $binOut 'source-revision.txt') -Force
+          Write-Host "PORTABLE-PROVENANCE OK: source_sha=$sha"
 
       - name: Generate build identity manifest
         shell: pwsh
