@@ -197,24 +197,48 @@ jobs:
       - name: Setup libSDL
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop";
-          $sdl_url = "https://www.libsdl.org/release/SDL-devel-1.2.15-VC.zip";
-          $sdl_dir = "$env:RUNNER_TEMP\SDL";
-          $null = New-Item -ItemType Directory -Force -Path $sdl_dir;
-          
-          Invoke-WebRequest -Uri $sdl_url -OutFile "$sdl_dir\sdl.zip";
-          Expand-Archive -Path "$sdl_dir\sdl.zip" -DestinationPath $sdl_dir -Force;
-          
-          $sdl_path = "$sdl_dir\SDL-1.2.15";
-          $libDir = "$sdl_path\lib";
-          $libX64 = "$libDir\x64";
-          
-          if (Test-Path $libX64) {
-            Copy-Item -Path "$libX64\*" -Destination $libDir -Force;
+          $ErrorActionPreference = 'Stop'
+          $sdl_url = 'https://www.libsdl.org/release/SDL-devel-1.2.15-VC.zip'
+          $sdl_dir = "$env:RUNNER_TEMP\SDL"
+          $null = New-Item -ItemType Directory -Force -Path $sdl_dir
+          $zipPath = Join-Path $sdl_dir 'sdl.zip'
+
+          # Retry the legacy SDL download, but never use an incomplete ZIP.
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+              Write-Host "SDL download attempt $attempt/4 from $sdl_url"
+              Invoke-WebRequest -Uri $sdl_url -OutFile $zipPath -TimeoutSec 90 -ErrorAction Stop
+              $length = (Get-Item -LiteralPath $zipPath).Length
+              if ($length -lt 100kb) { throw "SDL ZIP too small: $length bytes" }
+              Add-Type -AssemblyName System.IO.Compression
+              $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+              try {
+                $foundHeader = $archive.Entries | Where-Object {
+                  $_.FullName -match '(^|/)SDL-1\.2\.15/include/SDL\.h$'
+                } | Select-Object -First 1
+                if (-not $foundHeader) { throw 'SDL archive missing SDL-1.2.15/include/SDL.h' }
+              } finally { $archive.Dispose() }
+              $downloaded = $true
+              Write-Host "SDL ZIP validated ($length bytes)"
+              break
+            } catch {
+              Write-Warning "SDL attempt $attempt failed: $($_.Exception.Message)"
+              if ($attempt -lt 4) { Start-Sleep -Seconds (5 * $attempt) }
+            }
           }
-          
-          Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8;
-          Write-Host "Installed libSDL to $sdl_path";
+          if (-not $downloaded) { throw 'Failed to download a valid SDL 1.2.15 archive after four attempts' }
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $sdl_dir -Force
+          $sdl_path = "$sdl_dir\SDL-1.2.15"
+          $libDir = "$sdl_path\lib"
+          $libX64 = "$libDir\x64"
+          if (-not (Test-Path -LiteralPath "$sdl_path\include\SDL.h")) { throw 'SDL.h missing after expansion' }
+          if (Test-Path -LiteralPath $libX64) {
+            Copy-Item -Path "$libX64\*" -Destination $libDir -Force
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8
+          Write-Host "Installed libSDL to $sdl_path"
 
       - name: Configure VirtualBox
         shell: pwsh
