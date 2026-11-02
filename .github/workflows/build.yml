@@ -194,51 +194,37 @@ jobs:
           modules: 'qt5compat qtscxml'
           cache: true
 
-      - name: Setup libSDL
+      - name: Setup libSDL from repository archive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $sdl_url = 'https://www.libsdl.org/release/SDL-devel-1.2.15-VC.zip'
-          $sdl_dir = "$env:RUNNER_TEMP\SDL"
-          $null = New-Item -ItemType Directory -Force -Path $sdl_dir
-          $zipPath = Join-Path $sdl_dir 'sdl.zip'
+          # ZIP must be committed to the same repository as build.yml.
+          $sdlZip = Join-Path $env:GITHUB_WORKSPACE 'SDL-devel-1.2.15-VC.zip'
+          if (-not (Test-Path -LiteralPath $sdlZip -PathType Leaf)) {
+            throw "Bundled SDL archive not found: $sdlZip. Commit SDL-devel-1.2.15-VC.zip to Git first."
+          }
+          $expectedSha256 = '7443EE5CD1BD2A0F9FA8C01ACBEB4C779D0B03F9CE8A2AA47B0637D2A5461E50'
+          $actualSha256 = (Get-FileHash -LiteralPath $sdlZip -Algorithm SHA256).Hash
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "Bundled SDL archive SHA-256 mismatch: $actualSha256 (expected $expectedSha256)"
+          }
+          Write-Host "SDL local archive verified: $sdlZip ($actualSha256)"
 
-          # Retry the legacy SDL download, but never use an incomplete ZIP.
-          $downloaded = $false
-          for ($attempt = 1; $attempt -le 4; $attempt++) {
-            try {
-              if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-              Write-Host "SDL download attempt $attempt/4 from $sdl_url"
-              Invoke-WebRequest -Uri $sdl_url -OutFile $zipPath -TimeoutSec 90 -ErrorAction Stop
-              $length = (Get-Item -LiteralPath $zipPath).Length
-              if ($length -lt 100kb) { throw "SDL ZIP too small: $length bytes" }
-              Add-Type -AssemblyName System.IO.Compression
-              $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
-              try {
-                $foundHeader = $archive.Entries | Where-Object {
-                  $_.FullName -match '(^|/)SDL-1\.2\.15/include/SDL\.h$'
-                } | Select-Object -First 1
-                if (-not $foundHeader) { throw 'SDL archive missing SDL-1.2.15/include/SDL.h' }
-              } finally { $archive.Dispose() }
-              $downloaded = $true
-              Write-Host "SDL ZIP validated ($length bytes)"
-              break
-            } catch {
-              Write-Warning "SDL attempt $attempt failed: $($_.Exception.Message)"
-              if ($attempt -lt 4) { Start-Sleep -Seconds (5 * $attempt) }
+          $sdl_dir = Join-Path $env:RUNNER_TEMP 'SDL'
+          $null = New-Item -ItemType Directory -Force -Path $sdl_dir
+          Expand-Archive -LiteralPath $sdlZip -DestinationPath $sdl_dir -Force
+          $sdl_path = Join-Path $sdl_dir 'SDL-1.2.15'
+          $libDir = Join-Path $sdl_path 'lib'
+          $libX64 = Join-Path $libDir 'x64'
+          foreach ($required in @('include\SDL.h', 'lib\x64\SDL.lib', 'lib\x64\SDL.dll', 'lib\x64\SDLmain.lib')) {
+            $requiredPath = Join-Path $sdl_path $required
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+              throw "Bundled SDL archive missing required content: $required"
             }
           }
-          if (-not $downloaded) { throw 'Failed to download a valid SDL 1.2.15 archive after four attempts' }
-          Expand-Archive -LiteralPath $zipPath -DestinationPath $sdl_dir -Force
-          $sdl_path = "$sdl_dir\SDL-1.2.15"
-          $libDir = "$sdl_path\lib"
-          $libX64 = "$libDir\x64"
-          if (-not (Test-Path -LiteralPath "$sdl_path\include\SDL.h")) { throw 'SDL.h missing after expansion' }
-          if (Test-Path -LiteralPath $libX64) {
-            Copy-Item -Path "$libX64\*" -Destination $libDir -Force
-          }
+          Copy-Item -Path (Join-Path $libX64 '*') -Destination $libDir -Force
           Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8
-          Write-Host "Installed libSDL to $sdl_path"
+          Write-Host "Installed bundled SDL 1.2.15 to $sdl_path (no network download)"
 
       - name: Configure VirtualBox
         shell: pwsh
