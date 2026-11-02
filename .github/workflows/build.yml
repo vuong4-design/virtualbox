@@ -880,6 +880,49 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "VBOX_SDL_PATH=$sdl_path" -Encoding utf8
           Write-Host "Installed bundled SDL 1.2.15 to $sdl_path (no network download)"
 
+      - name: Setup NSIS 3.10 with installer logging support
+        uses: nsis-dev/setup-nsis@v1
+        with:
+          version: '3.10'
+          advanced-logging: true
+
+      - name: Stage NSIS and bundled nsProcess 1.7
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceNsis = $env:NSISDIR
+          if (-not $sourceNsis -or -not (Test-Path -LiteralPath (Join-Path $sourceNsis 'makensis.exe') -PathType Leaf)) {
+            throw "NSIS setup did not provide makensis.exe (NSISDIR='$sourceNsis')"
+          }
+          # The kBuild NSIS command is not quoted, so stage under a no-space path.
+          $nsisDir = Join-Path $env:RUNNER_TEMP 'vbox-nsis'
+          if (-not (Test-Path -LiteralPath $nsisDir)) {
+            Copy-Item -LiteralPath $sourceNsis -Destination $nsisDir -Recurse -Force
+          }
+          $zip = Join-Path $env:GITHUB_WORKSPACE '.github/tools/nsProcess-1.7.zip'
+          if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw "Missing bundled NSIS plugin: $zip" }
+          $expected = '30D7B4188280A01DD227E07373723A1EC6B1B3206D305FC4A2EC2691046F04E3'
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw "nsProcess archive SHA256 mismatch: $actual" }
+          $extract = Join-Path $env:RUNNER_TEMP 'vbox-nsprocess'
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+          $header = Join-Path $extract 'Include/nsProcess.nsh'
+          $dll = Join-Path $extract 'Plugin/nsProcess.dll'
+          foreach ($file in @($header, $dll)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "nsProcess plugin missing file: $file" }
+          }
+          $include = Join-Path $nsisDir 'Include'
+          $plugin = Join-Path $nsisDir 'Plugins/x86-unicode'
+          New-Item -ItemType Directory -Force -Path $include, $plugin | Out-Null
+          Copy-Item -LiteralPath $header -Destination (Join-Path $include 'nsProcess.nsh') -Force
+          Copy-Item -LiteralPath $dll -Destination (Join-Path $plugin 'nsProcess.dll') -Force
+          $makensis = Join-Path $nsisDir 'makensis.exe'
+          & $makensis /VERSION
+          if ($LASTEXITCODE -ne 0) { throw "NSIS failed verification: $LASTEXITCODE" }
+          $nsisPosix = $nsisDir.Replace('\', '/')
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VBOX_NSIS_PATH=$nsisPosix" -Encoding utf8
+          Write-Host "NSIS 3.10 (logging) and bundled nsProcess installed at $nsisPosix"
+
       - name: Configure VirtualBox (with Guest Additions)
         shell: pwsh
         working-directory: ${{ github.workspace }}
@@ -933,6 +976,7 @@ jobs:
             "# --- Guest Additions ---",
             "VBOX_WITHOUT_ADDITIONS = ",
             "VBOX_WITH_ADDITIONS_PACKING = 1",
+            "VBOX_PATH_NSIS = $env:VBOX_NSIS_PATH",
             "# --- Driver GA dung WDK $($env:KIT_VERSION) (KM headers + libs), host dung SDK 26100 ---",
             "#     (26100 khong co lib KM x86/win7/win8; 19041 thieu XFG/WinHv cho host)",
             "VBOX_WINDDK_GST = WINSDK10-KM-GST",
@@ -1064,6 +1108,28 @@ jobs:
             throw "kmk build failed with exit code $LASTEXITCODE.";
           }
 
+      - name: Package Windows Guest Additions x64 installer (NSIS)
+        timeout-minutes: 45
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:PATH"
+          $kmk = Join-Path $env:KBUILD_PATH 'bin/win.amd64/kmk.exe'
+          if (-not (Test-Path -LiteralPath $kmk -PathType Leaf)) { throw "kBuild not found: $kmk" }
+          $target = 'out/win.amd64/release/bin/additions/VBoxWindowsAdditions-amd64.exe'
+          Write-Host "Building actual Windows x64 Guest Additions NSIS installer: $target"
+          & $kmk "-j$([Environment]::ProcessorCount)" $target
+          if ($LASTEXITCODE -ne 0) { throw "NSIS Guest Additions packaging failed (kmk exit=$LASTEXITCODE)" }
+          $installer = Join-Path $env:GITHUB_WORKSPACE $target
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing packaged Guest Additions installer: $installer" }
+          $file = Get-Item -LiteralPath $installer
+          if ($file.Length -lt 1MB) { throw "Guest Additions installer is too small ($($file.Length) bytes): $installer" }
+          Write-Host "GUEST ADDITIONS INSTALLER OK: $installer ($($file.Length) bytes)"
+          Write-Host "SHA256: $((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash)"
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          Write-Host "Installer Authenticode status: $($signature.Status) (unsigned CI builds may need trusted signing before guest installation)"
+
       - name: Verify Guest Additions artifacts
         shell: pwsh
         working-directory: ${{ github.workspace }}
@@ -1071,8 +1137,8 @@ jobs:
           $ErrorActionPreference = "Stop";
 
           $add = "out\win.amd64\release\bin\additions";
-          $core = @("VBoxGuest.sys", "VBoxService.exe", "VBoxTray.exe", "VBoxControl.exe");
-          $extra = @("VBoxSF.sys", "VBoxMouse.sys", "VBoxVideo.sys", "VBoxWddm.sys", "VBoxCertUtil.exe");
+          $core = @("VBoxGuest.sys", "VBoxService.exe", "VBoxTray.exe", "VBoxControl.exe", "VBoxWindowsAdditions-amd64.exe");
+          $extra = @("VBoxSF.sys", "VBoxMouse.sys", "VBoxVideo.sys", "VBoxWddm.sys", "VBoxCertUtil.exe", "VBoxWindowsAdditions.exe");
 
           $missingCore = @();
           foreach ($f in $core + $extra) {
@@ -1086,12 +1152,12 @@ jobs:
             }
           }
 
-          $iso = "out\win.amd64\release\bin\VBoxGuestAdditions.iso";
+          $iso = "out\win.amd64\release\bin\additions\VBoxGuestAdditions.iso";
           if (Test-Path $iso) {
             Write-Host ("  OK   {0,-24} {1,10:N0} bytes" -f "VBoxGuestAdditions.iso", (Get-Item $iso).Length);
           }
           else {
-            Write-Host "  MISS VBoxGuestAdditions.iso" -ForegroundColor Yellow;
+            Write-Host "  MISS VBoxGuestAdditions.iso (ISO packaging is not guaranteed by this build)" -ForegroundColor Yellow;
           }
 
           if ($missingCore.Count -gt 0) {
@@ -1106,7 +1172,7 @@ jobs:
           if-no-files-found: warn
           path: |
             out/win.amd64/release/bin/additions/
-            out/win.amd64/release/bin/VBoxGuestAdditions.iso
+            out/win.amd64/release/bin/additions/VBoxGuestAdditions.iso
 
       - name: Upload build diagnostics (additions)
         if: always()
