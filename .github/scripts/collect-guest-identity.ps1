@@ -14,13 +14,15 @@
         pci     -> Win32_PnPEntity (VEN/DEV/SUBSYS/REV + LocationInfo -> BDF)
         cpuid   -> registry CentralProcessor (vendor/brand/identifier)
         storage -> Win32_DiskDrive (model/serial/firmware/interface)
+        gpu     -> Win32_VideoController (name/driver/PCI IDs)
         nic     -> Win32_NetworkAdapter (MAC + PCI ID)
         edid    -> root\wmi WmiMonitorID (manufacturer/product/serial)
         tpm     -> root\cimv2\security\microsofttpm Win32_Tpm
         guest   -> Win32_OperatingSystem (caption/version/build/arch)
 
     Giới hạn: CPUID leaf/register cần tool riêng (WMI không cung cấp); script
-    ghi vendor/brand/identifier từ registry.
+    ghi vendor/brand/identifier từ registry và cờ HypervisorPresent từ WMI.
+    Cờ WMI không thay thế phép đo CPUID leaf 0x1 ECX bit 31.
 
     Exit code: 0 = ghi thành công, 2 = lỗi tham số/không ghi được JSON.
 
@@ -140,7 +142,7 @@ function Get-CloakSmbiosSection {
     $System = @(Get-CloakWmiInstance -ClassName 'Win32_ComputerSystem')
     $Enclosure = @(Get-CloakWmiInstance -ClassName 'Win32_SystemEnclosure')
 
-    if ($Bios.Count -eq 0 -and $Board.Count -eq 0 -and $System.Count -eq 0) {
+    if ($Bios.Count -eq 0 -or $Board.Count -eq 0 -or $System.Count -eq 0) {
         [void] $script:Unavailable.Add('smbios')
         return $null
     }
@@ -177,11 +179,17 @@ function Get-CloakCpuidSection {
         [void] $script:Unavailable.Add('cpuid')
         return $null
     }
+    $HypervisorPresentFromWmi = 'unavailable'
+    $Systems = @(Get-CloakWmiInstance -ClassName 'Win32_ComputerSystem')
+    if ($Systems.Count -gt 0 -and $null -ne $Systems[0].PSObject.Properties['HypervisorPresent']) {
+        $HypervisorPresentFromWmi = ([bool]$Systems[0].HypervisorPresent).ToString().ToLowerInvariant()
+    }
     return [ordered] @{
-        vendor     = Get-CloakTrimmedString $Properties.VendorIdentifier
-        brand      = Get-CloakTrimmedString $Properties.ProcessorNameString
-        identifier = Get-CloakTrimmedString $Properties.Identifier
-        featureSet = Get-CloakTrimmedString $Properties.FeatureSet
+        vendor                     = Get-CloakTrimmedString $Properties.VendorIdentifier
+        brand                      = Get-CloakTrimmedString $Properties.ProcessorNameString
+        identifier                 = Get-CloakTrimmedString $Properties.Identifier
+        featureSet                 = Get-CloakTrimmedString $Properties.FeatureSet
+        hypervisorPresentFromWmi   = $HypervisorPresentFromWmi
     }
 }
 
@@ -217,7 +225,7 @@ function Get-CloakAcpiSection {
 }
 
 function Get-CloakPciSection {
-    $Entities = @(Get-CloakWmiInstance -ClassName 'Win32_PnPEntity' -Filter "PNPDeviceID LIKE 'PCI\\%'")
+    $Entities = @(Get-CloakWmiInstance -ClassName 'Win32_PnPEntity')
     if ($Entities.Count -eq 0) {
         [void] $script:Unavailable.Add('pci')
         return $null
@@ -256,6 +264,33 @@ function Get-CloakStorageSection {
         })
     }
     $Sorted = @($Devices | Sort-Object -Property model, serial, firmware, interface, mediaType)
+    return [ordered] @{ devices = $Sorted }
+}
+
+function Get-CloakGpuSection {
+    $Controllers = @(Get-CloakWmiInstance -ClassName 'Win32_VideoController')
+    if ($Controllers.Count -eq 0) {
+        [void] $script:Unavailable.Add('gpu')
+        return $null
+    }
+    $Devices = New-Object System.Collections.Generic.List[object]
+    foreach ($Controller in $Controllers) {
+        $Ids = Get-CloakPciIds $Controller.PNPDeviceID
+        $VendorId = ''
+        $DeviceId = ''
+        if ($Ids) {
+            $VendorId = $Ids.VendorId
+            $DeviceId = $Ids.DeviceId
+        }
+        $Devices.Add([ordered] @{
+            name           = Get-CloakTrimmedString $Controller.Name
+            videoProcessor = Get-CloakTrimmedString $Controller.VideoProcessor
+            driverVersion  = Get-CloakTrimmedString $Controller.DriverVersion
+            vendorId       = $VendorId
+            deviceId       = $DeviceId
+        })
+    }
+    $Sorted = @($Devices | Sort-Object -Property name, vendorId, deviceId, driverVersion)
     return [ordered] @{ devices = $Sorted }
 }
 
@@ -346,12 +381,13 @@ function Get-CloakGuestDocument {
         acpi          = Get-CloakAcpiSection
         pci           = Get-CloakPciSection
         storage       = Get-CloakStorageSection
+        gpu           = Get-CloakGpuSection
         nic           = Get-CloakNicSection
         edid          = Get-CloakEdidSection
         tpm           = Get-CloakTpmSection
     }
 
-    foreach ($Name in @('guest', 'smbios', 'cpuid', 'acpi', 'pci', 'storage', 'nic', 'edid')) {
+    foreach ($Name in @('guest', 'smbios', 'cpuid', 'acpi', 'pci', 'storage', 'gpu', 'nic', 'edid')) {
         if ($null -eq $Document[$Name]) {
             $Document.Remove($Name)
         }
@@ -396,6 +432,7 @@ function Get-CloakSelfTestDocument {
             brand      = 'Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz'
             identifier = 'Intel64 Family 6 Model 158 Stepping 10'
             featureSet = '2113669627'
+            hypervisorPresentFromWmi = 'true'
         }
         acpi          = [ordered] @{
             tables = @(
@@ -412,6 +449,11 @@ function Get-CloakSelfTestDocument {
         storage       = [ordered] @{
             devices = @(
                 [ordered] @{ model = 'VBOX HARDDISK'; serial = 'VB00000000000000'; firmware = '1.0'; interface = 'SCSI'; mediaType = 'Fixed hard disk media' }
+            )
+        }
+        gpu           = [ordered] @{
+            devices = @(
+                [ordered] @{ name = 'Synthetic Video Adapter'; videoProcessor = 'Synthetic GPU'; driverVersion = '1.0.0'; vendorId = '80ee'; deviceId = 'beef' }
             )
         }
         nic           = [ordered] @{
