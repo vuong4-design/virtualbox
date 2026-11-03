@@ -1197,6 +1197,14 @@ jobs:
             throw "kmk build failed with exit code $LASTEXITCODE.";
           }
 
+      - name: CI test-sign Guest Additions drivers and generate catalogs
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Ephemeral self-signed development certificate, never a production signature.
+          & .\.github\scripts\TestSign-GuestAdditions.ps1 -AdditionsDir 'out\win.amd64\release\bin\additions' -TargetOS '10_RS5_X64'
+
       - name: Package Windows Guest Additions x64 installer (NSIS)
         timeout-minutes: 45
         shell: pwsh
@@ -1212,7 +1220,7 @@ jobs:
           # creation (which requires installers for other OS/architecture builds).
           $installer = Join-Path $env:GITHUB_WORKSPACE 'out/win.amd64/release/bin/additions/VBoxWindowsAdditions-amd64.exe'
           Write-Host 'Packaging Windows x64 Guest Additions using kBuild packing pass'
-          & $kmk '-j2' 'VBOX_ONLY_ADDITIONS=1' 'VBOX_WITHOUT_ADDITIONS_ISO=1' 'packing'
+          & $kmk '-j2' 'VBOX_ONLY_ADDITIONS=1' 'VBOX_WITHOUT_ADDITIONS_ISO=1' 'VBOX_GA_CI_TESTSIGN=1' 'packing'
           if ($LASTEXITCODE -ne 0) { throw "NSIS Guest Additions packing pass failed (kmk exit=$LASTEXITCODE)" }
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing packaged Guest Additions installer: $installer" }
           $file = Get-Item -LiteralPath $installer
@@ -1221,6 +1229,13 @@ jobs:
           Write-Host "SHA256: $((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash)"
           $signature = Get-AuthenticodeSignature -LiteralPath $installer
           Write-Host "Installer Authenticode status: $($signature.Status) (unsigned CI builds may need trusted signing before guest installation)"
+
+      - name: Verify CI test-signed Guest Additions package after NSIS
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\.github\scripts\TestSign-GuestAdditions.ps1 -AdditionsDir 'out\win.amd64\release\bin\additions' -TargetOS '10_RS5_X64' -VerifyOnly
 
       - name: Verify Guest Additions artifacts
         shell: pwsh

@@ -158,6 +158,9 @@ Function Common_ExtractFiles
   ${EndIf}
   !endif
 !endif
+!ifdef VBOX_GA_CI_TESTSIGN
+  FILE "$%PATH_OUT%\bin\additions\VBoxGuest.cat"
+!endif
 
   ;
   ; Mouse driver
@@ -175,6 +178,9 @@ Function Common_ExtractFiles
       FILE "/oname=VBoxMouse.cat" "$%PATH_OUT%\bin\additions\VBoxMouse-PreW10.cat"
     ${EndIf}
   !endif
+!endif
+!ifdef VBOX_GA_CI_TESTSIGN
+  FILE "$%PATH_OUT%\bin\additions\VBoxMouse.cat"
 !endif
 
   ;
@@ -203,6 +209,9 @@ Function Common_ExtractFiles
     ${EndIf}
   !endif
 !endif ; VBOX_SIGN_ADDITIONS
+!ifdef VBOX_GA_CI_TESTSIGN
+  FILE "$%PATH_OUT%\bin\additions\VBoxVideo.cat"
+!endif
 
   ;
   ; VBoxWddm driver
@@ -222,6 +231,9 @@ Function Common_ExtractFiles
         FILE "/oname=VBoxWddm.cat" "$%PATH_OUT%\bin\additions\VBoxWddm-PreW10.cat"
       ${EndIf}
       !endif
+    !endif
+    !ifdef VBOX_GA_CI_TESTSIGN
+      FILE "$%PATH_OUT%\bin\additions\VBoxWddm.cat"
     !endif
     FILE "$%PATH_OUT%\bin\additions\VBoxWddm.sys"
     FILE "$%PATH_OUT%\bin\additions\VBoxWddm.inf"

@@ -330,6 +330,7 @@ endif
 			"/XSetCompressor /SOLID lzma" "/XSetCompressorDictSize $(if-expr $(KBUILD_TARGET_ARCH) == x86,4,16)" \
 			$(if-expr defined(VBOX_WITH_NATIVE_NSIS_INSTALLER),"/XTarget $(KBUILD_TARGET_ARCH)-unicode",) \
 			$(if $(VBOX_WITH_ADDITIONS_SHIPPING_AUDIO_TEST),'/DVBOX_WITH_ADDITIONS_SHIPPING_AUDIO_TEST=1') \
+			$(if $(VBOX_GA_CI_TESTSIGN),'/DVBOX_GA_CI_TESTSIGN=1') \
 			$(if $(VBOX_SIGNING_MODE),'/DEXTERNAL_UNINSTALLER=1') \
                        $(if-expr defined(VBOX_SIGN_ADDITIONS) && defined(VBOX_SIGNING_MODE), \
                        	'/DVBOX_SIGN_ADDITIONS=1' \
