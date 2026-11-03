@@ -1244,7 +1244,7 @@ jobs:
           $ErrorActionPreference = "Stop";
 
           $add = "out\win.amd64\release\bin\additions";
-          $core = @("VBoxGuest.sys", "VBoxService.exe", "VBoxTray.exe", "VBoxControl.exe", "VBoxWindowsAdditions-amd64.exe");
+          $core = @("VBoxGuest.sys", "VBoxService.exe", "VBoxTray.exe", "VBoxControl.exe", "VBoxWindowsAdditions-amd64.exe", "VBoxGuest.cat", "VBoxMouse.cat", "VBoxVideo.cat", "VBoxWddm.cat", "VBoxGATestSigner.cer", "VBoxGATestSigning.json");
           $extra = @("VBoxSF.sys", "VBoxMouse.sys", "VBoxVideo.sys", "VBoxWddm.sys", "VBoxCertUtil.exe", "VBoxWindowsAdditions.exe");
 
           $missingCore = @();

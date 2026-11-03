@@ -50,6 +50,22 @@ function Find-KitTool([string] $name) {
 function Hash-File([string] $file) {
     return (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
 }
+function Get-InfPackageFiles([string] $content) {
+    $inSourceDisksFiles = $false
+    $fileNames = @()
+    foreach ($line in ($content -split '\r?\n')) {
+        if ($line -match '^\s*\[([^\]]+)\]') {
+            $inSourceDisksFiles = ($Matches[1] -match '^SourceDisksFiles(?:\..+)?$')
+            continue
+        }
+        if (-not $inSourceDisksFiles -or $line -match '^\s*(;|$)') { continue }
+        if ($line -match '^\s*([^=;]+?)\s*=') {
+            $fileNames += $Matches[1].Trim()
+        }
+    }
+    if ($fileNames.Count -eq 0) { throw 'INF has no SourceDisksFiles entries to catalog' }
+    return $fileNames | Sort-Object -Unique
+}
 
 if ($VerifyOnly) {
     Require-File $manifestPath
@@ -125,8 +141,7 @@ foreach ($file in $sysFiles) {
 
 $workRoot = Join-Path $env:RUNNER_TEMP 'vbox-guest-test-signing'
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
-$stageFiles = @(Get-ChildItem -LiteralPath $add -File |
-    Where-Object { $_.Extension.ToLowerInvariant() -notin @('.inf', '.cat', '.pdb') })
+$protectedFiles = @($sysFiles | ForEach-Object { $_.Name })
 
 foreach ($name in $infNames) {
     $infPath = Join-Path $add "$name.inf"
@@ -141,14 +156,16 @@ foreach ($name in $infNames) {
     $text = $text.Insert($endOfLine + 1, "CatalogFile=$name.cat`r`n")
     [IO.File]::WriteAllText($infPath, $text, [Text.Encoding]::ASCII)
 
-    # Inf2Cat requires binaries referenced by the INF in the same package tree.
-    # Use a separate folder for each INF so the tool cannot process unrelated INFs.
+    # Copy exactly the files declared by the generated INF, not unrelated
+    # installer binaries that kBuild could legitimately rebuild later.
     $packageDir = Join-Path $workRoot $name
     New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-    foreach ($file in $stageFiles) {
-        if (-not (Test-Path -LiteralPath (Join-Path $packageDir $file.Name))) {
-            Copy-Item -LiteralPath $file.FullName -Destination $packageDir
-        }
+    $declaredFiles = @(Get-InfPackageFiles $text)
+    foreach ($fileName in $declaredFiles) {
+        $sourceFile = Join-Path $add $fileName
+        Require-File $sourceFile
+        Copy-Item -LiteralPath $sourceFile -Destination $packageDir -Force
+        $protectedFiles += $fileName
     }
     Copy-Item -LiteralPath $infPath -Destination $packageDir -Force
     Invoke-Tool $inf2cat @("/driver:$packageDir", "/os:$TargetOS", '/verbose')
@@ -161,8 +178,9 @@ foreach ($name in $infNames) {
     Write-Host "CI TEST catalog signed: $name.cat"
 }
 
-# Hash every file whose bits must remain intact until NSIS packages them.
-$importantFiles = @($sysFiles | ForEach-Object { $_.Name }) +
+# Hash signed drivers and exact INF-declared files, not unrelated installer
+# helpers that may be regenerated during the kBuild packing pass.
+$importantFiles = @($protectedFiles) +
     @($infNames | ForEach-Object { "$_.inf"; "$_.cat" })
 $manifestFiles = @($importantFiles | Sort-Object -Unique | ForEach-Object {
     $p = Join-Path $add $_
