@@ -886,7 +886,7 @@ jobs:
           version: '3.10'
           advanced-logging: true
 
-      - name: Stage NSIS and bundled nsProcess 1.7
+      - name: Stage NSIS plugins (nsProcess and AccessControl)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -911,6 +911,24 @@ jobs:
           foreach ($file in @($header, $dll)) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "nsProcess plugin missing file: $file" }
           }
+          # Bundle the AccessControl Unicode plugin required by
+          # VBoxGuestAdditionsCommon.nsh (GetCurrentUserName/SetOnFile/GrantOnFile).
+          $accessZip = Join-Path $env:GITHUB_WORKSPACE '.github/tools/AccessControl-1.0.8.3.zip'
+          if (-not (Test-Path -LiteralPath $accessZip -PathType Leaf)) { throw "Missing AccessControl archive: $accessZip" }
+          $accessExpected = '9AA60F9C5C023FDA2808AF216514D8913D2673BC522D944EE771DA032A1BDC10'
+          $accessActual = (Get-FileHash -LiteralPath $accessZip -Algorithm SHA256).Hash
+          if ($accessActual -ne $accessExpected) { throw "AccessControl archive SHA256 mismatch: $accessActual" }
+          $accessExtract = Join-Path $env:RUNNER_TEMP 'vbox-accesscontrol'
+          Expand-Archive -LiteralPath $accessZip -DestinationPath $accessExtract -Force
+          $accessDll = Join-Path $accessExtract 'Plugins/i386-unicode/AccessControl.dll'
+          if (-not (Test-Path -LiteralPath $accessDll -PathType Leaf)) {
+            throw "Missing NSIS Unicode x86 AccessControl.dll: $accessDll"
+          }
+          # Validate PE architecture before putting DLL into x86-unicode plugin folder.
+          $accessBytes = [System.IO.File]::ReadAllBytes($accessDll)
+          $peOffset = [BitConverter]::ToInt32($accessBytes, 0x3c)
+          $peMachine = [BitConverter]::ToUInt16($accessBytes, $peOffset + 4)
+          if ($peMachine -ne 0x014c) { throw "AccessControl DLL must be x86; PE machine=0x$($peMachine.ToString('X4'))" }
           # makensis may resolve Plugins from NSISDIR (the original install)
           # even when its executable was copied to a staging directory.
           # Stage into BOTH locations, and point NSISDIR at the staging copy.
@@ -920,10 +938,11 @@ jobs:
             New-Item -ItemType Directory -Force -Path $includeDir, $pluginDir | Out-Null
             Copy-Item -LiteralPath $header -Destination (Join-Path $includeDir 'nsProcess.nsh') -Force
             Copy-Item -LiteralPath $dll -Destination (Join-Path $pluginDir 'nsProcess.dll') -Force
-            foreach ($file in @((Join-Path $includeDir 'nsProcess.nsh'), (Join-Path $pluginDir 'nsProcess.dll'))) {
+            Copy-Item -LiteralPath $accessDll -Destination (Join-Path $pluginDir 'AccessControl.dll') -Force
+            foreach ($file in @((Join-Path $includeDir 'nsProcess.nsh'), (Join-Path $pluginDir 'nsProcess.dll'), (Join-Path $pluginDir 'AccessControl.dll'))) {
               if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NSIS dependency staging failed: $file" }
             }
-            Write-Host "Staged nsProcess under NSIS root: $root"
+            Write-Host "Staged nsProcess and AccessControl under NSIS root: $root"
           }
           $env:NSISDIR = $nsisDir
           # /NOCD does not search the directory containing the .nsi file.
@@ -952,22 +971,28 @@ jobs:
           if (-not (Test-Path -LiteralPath $installerNsi -PathType Leaf)) { throw "Missing installer source: $installerNsi" }
           $localHeader = Join-Path $installerSource 'nsProcess.nsh'
           Copy-Item -LiteralPath $header -Destination $localHeader -Force
-          foreach ($file in @($localHeader, (Join-Path $nsisDir 'Include/nsProcess.nsh'), (Join-Path $nsisDir 'Plugins/x86-unicode/nsProcess.dll'), (Join-Path $sourceNsis 'Plugins/x86-unicode/nsProcess.dll'))) {
+          foreach ($file in @($localHeader, (Join-Path $nsisDir 'Include/nsProcess.nsh'), (Join-Path $nsisDir 'Plugins/x86-unicode/nsProcess.dll'), (Join-Path $sourceNsis 'Plugins/x86-unicode/nsProcess.dll'), (Join-Path $nsisDir 'Plugins/x86-unicode/AccessControl.dll'), (Join-Path $sourceNsis 'Plugins/x86-unicode/AccessControl.dll'))) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NSIS staging missing: $file" }
           }
           $makensis = Join-Path $nsisDir 'makensis.exe'
           & $makensis /VERSION
           if ($LASTEXITCODE -ne 0) { throw "NSIS failed verification: $LASTEXITCODE" }
-          # Compile a tiny NSIS program to catch BOTH missing include paths
-          # and missing plugin DLLs before the expensive kBuild packing pass.
-          $probeScript = Join-Path $installerSource '_ci_nsprocess_preflight.nsi'
-          $probeExe = Join-Path $env:RUNNER_TEMP 'vbox-nsprocess-preflight.exe'
+          # Compile a tiny NSIS program to catch missing include paths and ALL
+          # external plugin DLLs (nsProcess + AccessControl) before kBuild.
+          $probeScript = Join-Path $installerSource '_ci_nsis_plugins_preflight.nsi'
+          $probeExe = Join-Path $env:RUNNER_TEMP 'vbox-nsis-plugins-preflight.exe'
           $probeText = @'
           !include "nsProcess.nsh"
-          Name "VirtualBox nsProcess preflight"
+          Name "VirtualBox Guest Additions NSIS plugins preflight"
           OutFile "__PROBE_EXE__"
           Section
             ${nsProcess::FindProcess} "explorer.exe" $0
+            AccessControl::GetCurrentUserName
+            Pop $1
+            AccessControl::SetOnFile "$TEMP\vbox-nsis-ci-probe" "(BU)" "GenericRead"
+            Pop $2
+            AccessControl::GrantOnFile "$TEMP\vbox-nsis-ci-probe" "(BU)" "GenericRead"
+            Pop $3
           SectionEnd
           '@
           $probeText = $probeText.Replace('__PROBE_EXE__', $probeExe)
@@ -975,17 +1000,17 @@ jobs:
           Push-Location -LiteralPath $installerSource
           try {
             & $makensis /NOCD /V3 $probeScript
-            if ($LASTEXITCODE -ne 0) { throw "nsProcess NSIS compile preflight failed (exit=$LASTEXITCODE)" }
+            if ($LASTEXITCODE -ne 0) { throw "NSIS external plugins compile preflight failed (exit=$LASTEXITCODE)" }
           } finally {
             Pop-Location
             Remove-Item -LiteralPath $probeScript -Force -ErrorAction SilentlyContinue
           }
           if (-not (Test-Path -LiteralPath $probeExe -PathType Leaf)) { throw "NSIS preflight did not produce $probeExe" }
-          Write-Host 'NSIS nsProcess include + plugin compile preflight: PASS'
+          Write-Host 'NSIS nsProcess + AccessControl (3 APIs) compile preflight: PASS'
           $nsisPosix = $nsisDir.Replace('\', '/')
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VBOX_NSIS_PATH=$nsisPosix" -Encoding utf8
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "NSISDIR=$nsisDir" -Encoding utf8
-          Write-Host "NSIS 3.10 (logging) and bundled nsProcess installed at $nsisPosix"
+          Write-Host "NSIS 3.10 (logging), nsProcess 1.7 and AccessControl 1.0.8.3 ready at $nsisPosix"
 
       - name: Configure VirtualBox (with Guest Additions)
         shell: pwsh
