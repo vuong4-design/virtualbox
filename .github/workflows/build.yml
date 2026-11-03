@@ -916,9 +916,44 @@ jobs:
           New-Item -ItemType Directory -Force -Path $include, $plugin | Out-Null
           Copy-Item -LiteralPath $header -Destination (Join-Path $include 'nsProcess.nsh') -Force
           Copy-Item -LiteralPath $dll -Destination (Join-Path $plugin 'nsProcess.dll') -Force
+          # The packaging rule invokes makensis with -C at the installer source
+          # directory. Put the include beside VBoxGuestAdditions.nsi too, so its
+          # resolution is independent of the NSIS install/include search path.
+          $installerSource = Join-Path $env:GITHUB_WORKSPACE 'src/VBox/Additions/win/Installer'
+          $installerNsi = Join-Path $installerSource 'VBoxGuestAdditions.nsi'
+          if (-not (Test-Path -LiteralPath $installerNsi -PathType Leaf)) { throw "Missing installer source: $installerNsi" }
+          $localHeader = Join-Path $installerSource 'nsProcess.nsh'
+          Copy-Item -LiteralPath $header -Destination $localHeader -Force
+          foreach ($file in @((Join-Path $include 'nsProcess.nsh'), $localHeader, (Join-Path $plugin 'nsProcess.dll'))) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NSIS staging missing: $file" }
+          }
           $makensis = Join-Path $nsisDir 'makensis.exe'
           & $makensis /VERSION
           if ($LASTEXITCODE -ne 0) { throw "NSIS failed verification: $LASTEXITCODE" }
+          # Compile a tiny NSIS program to catch BOTH missing include paths
+          # and missing plugin DLLs before the expensive kBuild packing pass.
+          $probeScript = Join-Path $installerSource '_ci_nsprocess_preflight.nsi'
+          $probeExe = Join-Path $env:RUNNER_TEMP 'vbox-nsprocess-preflight.exe'
+          $probeText = @'
+          !include "nsProcess.nsh"
+          Name "VirtualBox nsProcess preflight"
+          OutFile "__PROBE_EXE__"
+          Section
+            ${nsProcess::FindProcess} "explorer.exe" $0
+          SectionEnd
+          '@
+          $probeText = $probeText.Replace('__PROBE_EXE__', $probeExe)
+          Set-Content -LiteralPath $probeScript -Value $probeText -Encoding ascii
+          Push-Location -LiteralPath $installerSource
+          try {
+            & $makensis /NOCD /V3 $probeScript
+            if ($LASTEXITCODE -ne 0) { throw "nsProcess NSIS compile preflight failed (exit=$LASTEXITCODE)" }
+          } finally {
+            Pop-Location
+            Remove-Item -LiteralPath $probeScript -Force -ErrorAction SilentlyContinue
+          }
+          if (-not (Test-Path -LiteralPath $probeExe -PathType Leaf)) { throw "NSIS preflight did not produce $probeExe" }
+          Write-Host 'NSIS nsProcess include + plugin compile preflight: PASS'
           $nsisPosix = $nsisDir.Replace('\', '/')
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VBOX_NSIS_PATH=$nsisPosix" -Encoding utf8
           Write-Host "NSIS 3.10 (logging) and bundled nsProcess installed at $nsisPosix"
