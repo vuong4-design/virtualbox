@@ -926,6 +926,18 @@ jobs:
             Write-Host "Staged nsProcess under NSIS root: $root"
           }
           $env:NSISDIR = $nsisDir
+          # /NOCD does not search the directory containing the .nsi file.
+          # NSIS reads nsisconf.nsh before compiling, so declare explicit
+          # include and plugin search paths for BOTH preflight and kBuild.
+          $nsisConfig = Join-Path $nsisDir 'nsisconf.nsh'
+          $includeSearchPath = (Join-Path $nsisDir 'Include').Replace('\', '/')
+          $pluginSearchPath = (Join-Path $nsisDir 'Plugins/x86-unicode').Replace('\', '/')
+          Add-Content -LiteralPath $nsisConfig -Encoding ascii -Value @(
+            "!addincludedir `"$includeSearchPath`""
+            "!addplugindir /x86-unicode `"$pluginSearchPath`""
+          )
+          Write-Host "NSIS compiler config: $nsisConfig"
+          Get-Content -LiteralPath $nsisConfig | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
           # The packaging rule invokes makensis with -C at the installer source
           # directory. Put the include beside VBoxGuestAdditions.nsi too, so its
           # resolution is independent of the NSIS install/include search path.
