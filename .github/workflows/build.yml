@@ -1117,11 +1117,14 @@ jobs:
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:PATH"
           $kmk = Join-Path $env:KBUILD_PATH 'bin/win.amd64/kmk.exe'
           if (-not (Test-Path -LiteralPath $kmk -PathType Leaf)) { throw "kBuild not found: $kmk" }
-          $target = 'out/win.amd64/release/bin/additions/VBoxWindowsAdditions-amd64.exe'
+          # kBuild defines this rule via $(PATH_STAGE_BIN), which is absolute.
+          # A workspace-relative path is NOT equivalent and gives "No rule to make target".
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'out/win.amd64/release/bin/additions/VBoxWindowsAdditions-amd64.exe'
+          $target = [IO.Path]::GetFullPath($installer).Replace('\', '/')
+          if (-not [IO.Path]::IsPathRooted($target)) { throw "Expected absolute kBuild target: $target" }
           Write-Host "Building actual Windows x64 Guest Additions NSIS installer: $target"
           & $kmk "-j$([Environment]::ProcessorCount)" $target
-          if ($LASTEXITCODE -ne 0) { throw "NSIS Guest Additions packaging failed (kmk exit=$LASTEXITCODE)" }
-          $installer = Join-Path $env:GITHUB_WORKSPACE $target
+          if ($LASTEXITCODE -ne 0) { throw "NSIS Guest Additions packaging failed (kmk exit=$LASTEXITCODE; target=$target)" }
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing packaged Guest Additions installer: $installer" }
           $file = Get-Item -LiteralPath $installer
           if ($file.Length -lt 1MB) { throw "Guest Additions installer is too small ($($file.Length) bytes): $installer" }
