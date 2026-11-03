@@ -932,10 +932,16 @@ jobs:
           $nsisConfig = Join-Path $nsisDir 'nsisconf.nsh'
           $includeSearchPath = (Join-Path $nsisDir 'Include').Replace('\', '/')
           $pluginSearchPath = (Join-Path $nsisDir 'Plugins/x86-unicode').Replace('\', '/')
-          Add-Content -LiteralPath $nsisConfig -Encoding ascii -Value @(
-            "!addincludedir `"$includeSearchPath`""
-            "!addplugindir /x86-unicode `"$pluginSearchPath`""
-          )
+          # The supplied nsisconf.nsh has no trailing newline. Add-Content
+          # would concatenate our first directive with its final !macroend.
+          $nsisDirectives = "`r`n!addincludedir `"$includeSearchPath`"`r`n!addplugindir /x86-unicode `"$pluginSearchPath`"`r`n"
+          [System.IO.File]::AppendAllText($nsisConfig, $nsisDirectives, [System.Text.Encoding]::ASCII)
+          $configText = [System.IO.File]::ReadAllText($nsisConfig)
+          if ($configText -match '!macroend!addincludedir' -or
+              $configText -notmatch '(?m)^!addincludedir ' -or
+              $configText -notmatch '(?m)^!addplugindir /x86-unicode ') {
+            throw "NSIS config directives are not on separate lines: $nsisConfig"
+          }
           Write-Host "NSIS compiler config: $nsisConfig"
           Get-Content -LiteralPath $nsisConfig | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
           # The packaging rule invokes makensis with -C at the installer source
