@@ -911,11 +911,21 @@ jobs:
           foreach ($file in @($header, $dll)) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "nsProcess plugin missing file: $file" }
           }
-          $include = Join-Path $nsisDir 'Include'
-          $plugin = Join-Path $nsisDir 'Plugins/x86-unicode'
-          New-Item -ItemType Directory -Force -Path $include, $plugin | Out-Null
-          Copy-Item -LiteralPath $header -Destination (Join-Path $include 'nsProcess.nsh') -Force
-          Copy-Item -LiteralPath $dll -Destination (Join-Path $plugin 'nsProcess.dll') -Force
+          # makensis may resolve Plugins from NSISDIR (the original install)
+          # even when its executable was copied to a staging directory.
+          # Stage into BOTH locations, and point NSISDIR at the staging copy.
+          foreach ($root in @($sourceNsis, $nsisDir) | Select-Object -Unique) {
+            $includeDir = Join-Path $root 'Include'
+            $pluginDir = Join-Path $root 'Plugins/x86-unicode'
+            New-Item -ItemType Directory -Force -Path $includeDir, $pluginDir | Out-Null
+            Copy-Item -LiteralPath $header -Destination (Join-Path $includeDir 'nsProcess.nsh') -Force
+            Copy-Item -LiteralPath $dll -Destination (Join-Path $pluginDir 'nsProcess.dll') -Force
+            foreach ($file in @((Join-Path $includeDir 'nsProcess.nsh'), (Join-Path $pluginDir 'nsProcess.dll'))) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NSIS dependency staging failed: $file" }
+            }
+            Write-Host "Staged nsProcess under NSIS root: $root"
+          }
+          $env:NSISDIR = $nsisDir
           # The packaging rule invokes makensis with -C at the installer source
           # directory. Put the include beside VBoxGuestAdditions.nsi too, so its
           # resolution is independent of the NSIS install/include search path.
@@ -924,7 +934,7 @@ jobs:
           if (-not (Test-Path -LiteralPath $installerNsi -PathType Leaf)) { throw "Missing installer source: $installerNsi" }
           $localHeader = Join-Path $installerSource 'nsProcess.nsh'
           Copy-Item -LiteralPath $header -Destination $localHeader -Force
-          foreach ($file in @((Join-Path $include 'nsProcess.nsh'), $localHeader, (Join-Path $plugin 'nsProcess.dll'))) {
+          foreach ($file in @($localHeader, (Join-Path $nsisDir 'Include/nsProcess.nsh'), (Join-Path $nsisDir 'Plugins/x86-unicode/nsProcess.dll'), (Join-Path $sourceNsis 'Plugins/x86-unicode/nsProcess.dll'))) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "NSIS staging missing: $file" }
           }
           $makensis = Join-Path $nsisDir 'makensis.exe'
@@ -956,6 +966,7 @@ jobs:
           Write-Host 'NSIS nsProcess include + plugin compile preflight: PASS'
           $nsisPosix = $nsisDir.Replace('\', '/')
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VBOX_NSIS_PATH=$nsisPosix" -Encoding utf8
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "NSISDIR=$nsisDir" -Encoding utf8
           Write-Host "NSIS 3.10 (logging) and bundled nsProcess installed at $nsisPosix"
 
       - name: Configure VirtualBox (with Guest Additions)
