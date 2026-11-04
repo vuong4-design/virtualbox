@@ -81,6 +81,50 @@ DECLHIDDEN(const MACHINEPROFILE *) CloakGetTestProfile(void)
     return cloakGetTestProfile();
 }
 
+#ifdef VBOX_WITH_CLOAK_LAB_PROFILE
+/*
+ * Explicitly opt-in development profile for real-VM DMI/ACPI testing.
+ * This profile is NOT registered as a production-compatible profile and
+ * never changes the Guest Additions PCI/graphics identity bindings.
+ */
+static const MACHINEPROFILE *cloakGetLabProfile(void)
+{
+    static const MACHINEPROFILE s_Profile = []() -> MACHINEPROFILE
+    {
+        MACHINEPROFILE Profile = {};
+        Profile.pszProfileId = "lab-dmi-v1";
+        Profile.pszDisplayName = "Lab-only DMI and ACPI profile";
+        Profile.pszSystemVendor = "LabVendor";
+        Profile.pszSystemProduct = "LabDesktop-01";
+        Profile.pszSystemVersion = "1.0";
+        Profile.pszSystemFamily = "Lab Desktop";
+        Profile.pszBiosVendor = "LabFirmware";
+        Profile.pszBiosVersion = "LAB-1.0";
+        Profile.pszBiosReleaseDate = "20261104";
+        Profile.pszBoardVendor = "LabVendor";
+        Profile.pszBoardProduct = "LabBoard-01";
+        Profile.pszChassisVendor = "LabVendor";
+        Profile.pszChassisType = "Desktop";
+        Profile.pszProcManufacturer = "GenuineIntel";
+        Profile.pszAcpiOemId = "LAB";
+        Profile.uI440FxVendorId = 0x8086;
+        Profile.uI440FxDeviceId = 0x1237;
+        Profile.uPiix3IsaDeviceId = 0x7000;
+        Profile.uNicVendorId = 0x8086;
+        Profile.uNicDeviceId = 0x100e;
+        Profile.uVmmDevVendorId = CLOAKBINDING_VMMDEV_VENDOR_ID;
+        Profile.uVmmDevDeviceId = CLOAKBINDING_VMMDEV_DEVICE_ID;
+        Profile.enmClass = CLOAKPROFILE_DRAFT;
+        Profile.fSupportedChipsets = CLOAKCHIPSET_I440FX | CLOAKCHIPSET_PIIX3;
+        Profile.pszRequiredFirmwareFamily = "virtualbox-lab";
+        Profile.pszSourceModel = "lab-only";
+        Profile.pszSourceBiosDate = "20261104";
+        Profile.pszProvenanceHash = "lab-only-not-for-production";
+        return Profile;
+    }();
+    return &s_Profile;
+}
+#endif
 static const MACHINEPROFILE * const g_apCloakProfiles[] =
 {
     NULL
@@ -255,27 +299,6 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         return VINF_SUCCESS;
     }
 
-    PCCLOAKBUILDMANIFEST pManifest = CloakGetBuildManifest();
-    if (!pManifest || !pManifest->pszBuildMode || RTStrCmp(pManifest->pszBuildMode, "cloak"))
-    {
-        LogRel(("Cloak: enabled in a '%s' build; a cloak build is required\n",
-                pManifest && pManifest->pszBuildMode ? pManifest->pszBuildMode : "unknown"));
-        return VERR_NOT_SUPPORTED;
-    }
-    vrc = CloakValidateBuildManifest(pManifest);
-    if (RT_FAILURE(vrc))
-    {
-        LogRel(("Cloak: build manifest is incomplete or violates the binding contract, vrc=%Rrc\n", vrc));
-        return vrc;
-    }
-
-    vrc = CloakValidateProductionRegistry(g_apCloakProfiles, RT_ELEMENTS(g_apCloakProfiles), pManifest);
-    if (RT_FAILURE(vrc))
-    {
-        LogRel(("Cloak: production profile registry is invalid, vrc=%Rrc\n", vrc));
-        return vrc;
-    }
-
     char szProfile[CLOAK_PROFILE_ID_MAX];
     vrc = cloakQueryString(mpVMM, pCloak, "Profile", szProfile, sizeof(szProfile));
     if (RT_FAILURE(vrc))
@@ -284,33 +307,81 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         return vrc;
     }
 
-    const MACHINEPROFILE *pProfile = CloakFindProfile(szProfile, false);
+    /*
+     * The lab profile is a deliberately separate, explicit development path:
+     * it may materialize DMI/ACPI on a throwaway test VM, but never enters the
+     * production registry or relaxes any production manifest validation.
+     */
+    bool fLabProfile = false;
+#ifdef VBOX_WITH_CLOAK_LAB_PROFILE
+    fLabProfile = !RTStrCmp(szProfile, cloakGetLabProfile()->pszProfileId);
+#endif
+    PCCLOAKBUILDMANIFEST pManifest = CloakGetBuildManifest();
+    if (!fLabProfile)
+    {
+        if (!pManifest || !pManifest->pszBuildMode || RTStrCmp(pManifest->pszBuildMode, "cloak"))
+        {
+            LogRel(("Cloak: enabled in a '%s' build; a cloak build is required\n",
+                    pManifest && pManifest->pszBuildMode ? pManifest->pszBuildMode : "unknown"));
+            return VERR_NOT_SUPPORTED;
+        }
+        vrc = CloakValidateBuildManifest(pManifest);
+        if (RT_FAILURE(vrc))
+        {
+            LogRel(("Cloak: build manifest is incomplete or violates the binding contract, vrc=%Rrc\n", vrc));
+            return vrc;
+        }
+        vrc = CloakValidateProductionRegistry(g_apCloakProfiles, RT_ELEMENTS(g_apCloakProfiles), pManifest);
+        if (RT_FAILURE(vrc))
+        {
+            LogRel(("Cloak: production profile registry is invalid, vrc=%Rrc\n", vrc));
+            return vrc;
+        }
+    }
+
+    const MACHINEPROFILE *pProfile = NULL;
+#ifdef VBOX_WITH_CLOAK_LAB_PROFILE
+    if (fLabProfile)
+        pProfile = cloakGetLabProfile();
+    else
+#endif
+        pProfile = CloakFindProfile(szProfile, false);
     if (!pProfile)
     {
         LogRel(("Cloak: profile '%s' is not available in the production registry\n", szProfile));
         return VERR_NOT_FOUND;
     }
-    if (pProfile->enmClass != CLOAKPROFILE_COMPATIBLE)
-    {
-        LogRel(("Cloak: profile '%s' has non-production class %s\n",
-                pProfile->pszProfileId, CloakProfileClassToString(pProfile->enmClass)));
-        return VERR_ACCESS_DENIED;
-    }
 
     vrc = CloakValidateProfileForMaterialization(pProfile);
     if (RT_FAILURE(vrc))
     {
-        LogRel(("Cloak: profile '%s' is missing materializable identity fields, vrc=%Rrc\n",
+        LogRel(("Cloak: profile '%s' is missing materializable DMI/ACPI fields, vrc=%Rrc\n",
                 pProfile->pszProfileId, vrc));
         return vrc;
     }
-
-    vrc = CloakValidateProfileAgainstManifest(pProfile, pManifest);
-    if (RT_FAILURE(vrc))
+    if (fLabProfile)
     {
-        LogRel(("Cloak: profile '%s' is incompatible with the build manifest, vrc=%Rrc\n",
-                pProfile->pszProfileId, vrc));
-        return vrc;
+        if (pProfile->enmClass != CLOAKPROFILE_DRAFT
+            || pProfile->uVmmDevVendorId != CLOAKBINDING_VMMDEV_VENDOR_ID
+            || pProfile->uVmmDevDeviceId != CLOAKBINDING_VMMDEV_DEVICE_ID)
+            return VERR_ACCESS_DENIED;
+        LogRel(("Cloak: LAB DMI/ACPI profile selected (not a production cloak build)\n"));
+    }
+    else
+    {
+        if (pProfile->enmClass != CLOAKPROFILE_COMPATIBLE)
+        {
+            LogRel(("Cloak: profile '%s' has non-production class %s\n",
+                    pProfile->pszProfileId, CloakProfileClassToString(pProfile->enmClass)));
+            return VERR_ACCESS_DENIED;
+        }
+        vrc = CloakValidateProfileAgainstManifest(pProfile, pManifest);
+        if (RT_FAILURE(vrc))
+        {
+            LogRel(("Cloak: profile '%s' is incompatible with the build manifest, vrc=%Rrc\n",
+                    pProfile->pszProfileId, vrc));
+            return vrc;
+        }
     }
 
     char szSeedHashStored[RTSHA256_DIGEST_LEN + 1];

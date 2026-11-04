@@ -280,6 +280,7 @@ jobs:
             "VBOX_PATH_QT = $qtDir",
             "VBOX_WITH_HARDENING = ",
             "VBOX_WITHOUT_ADDITIONS = 1",
+            "VBOX_WITH_CLOAK_LAB_PROFILE = 1",
             "VBOX_WITH_ADDITIONS_PACKING = ",
             "VBOX_WITH_WARNINGS_AS_ERRORS = ",
             "VBOX_WITH_TESTCASES = ",
@@ -310,6 +311,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "kmk build failed with exit code $LASTEXITCODE.";
           }
+
+      - name: Verify lab-only DMI profile is embedded in VBoxC
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dll = 'out\win.amd64\release\bin\VBoxC.dll'
+          if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw "Missing $dll" }
+          $imageText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll).Path))
+          foreach ($value in @('lab-dmi-v1', 'LabVendor', 'LabDesktop-01', 'LAB DMI/ACPI profile selected')) {
+            if (-not $imageText.Contains($value)) { throw "Development identity marker not compiled into VBoxC.dll: $value" }
+          }
+          if ($imageText.Contains('CloakBuildIdentity.h is only valid')) { Write-Warning 'Unexpected build identity macro string discovered' }
+          Write-Host 'PASS: lab-only DMI/ACPI identity is embedded in host runtime'
 
       - name: Build and run cloak config testcase
         shell: pwsh
