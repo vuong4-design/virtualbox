@@ -67,6 +67,37 @@ function Get-InfPackageFiles([string] $content) {
     return $fileNames | Sort-Object -Unique
 }
 
+function Assert-TestSignature([string] $file, [string] $thumbprint) {
+    Require-File $file
+    $sig = Get-AuthenticodeSignature -LiteralPath $file
+    $signer = $sig.SignerCertificate
+    if (-not $signer -or $signer.Thumbprint -ne $thumbprint) {
+        throw "CI test signature signer mismatch for $file (status=$($sig.Status))"
+    }
+    # The CI runner does NOT trust the self-signed test root. Validation
+    # must not import certificates into Root, which may prompt indefinitely.
+    $trustOnly = $sig.Status -eq 'NotTrusted' -or (
+        $sig.Status -eq 'UnknownError' -and
+        $sig.StatusMessage -match '(?i)not trusted|untrusted root|0x800b0109|0x800b010a'
+    )
+    if ($sig.Status -ne 'Valid' -and -not $trustOnly) {
+        throw "Unexpected signature status for $file : $($sig.Status) / $($sig.StatusMessage)"
+    }
+    Write-Host "TEST SIGNATURE OK: $(Split-Path $file -Leaf) (trust=$($sig.Status); signer=$($signer.Thumbprint))"
+}
+function Assert-CatalogMember([string] $signTool, [string] $catalog, [string] $inf) {
+    # SignTool validates catalog membership and its hashes before chain trust.
+    # Only a known UNTRUSTED TEST ROOT is tolerated, not a hash/signature error.
+    $verifyOutput = @(& $signTool verify /pa /v /c $catalog $inf 2>&1 | ForEach-Object { $_.ToString() })
+    $verifyExit = $LASTEXITCODE
+    $message = $verifyOutput -join [Environment]::NewLine
+    if ($verifyExit -eq 0) { Write-Host "Catalog member verified: $inf"; return }
+    $untrustedRoot = $message -match '(?i)0x800b0109|0x800b010a|CERT_E_UNTRUSTEDROOT|a root certificate which is not trusted|certificate chain.*untrusted'
+    if (-not $untrustedRoot) {
+        throw "Catalog member verification failed for $inf (exit=$verifyExit): $message"
+    }
+    Write-Host "Catalog member tested; CI self-signed root intentionally untrusted: $inf"
+}
 if ($VerifyOnly) {
     Require-File $manifestPath
     Require-File $publicCertPath
@@ -90,8 +121,8 @@ if ($VerifyOnly) {
     foreach ($name in $infNames) {
         $cat = Join-Path $add "$name.cat"
         $inf = Join-Path $add "$name.inf"
-        Invoke-Tool $signTool @('verify', '/pa', $cat)
-        Invoke-Tool $signTool @('verify', '/pa', '/c', $cat, $inf)
+        Assert-TestSignature $cat $cert.Thumbprint
+        Assert-CatalogMember $signTool $cat $inf
     }
     Write-Host "Test signing artifact integrity PASS: $count files and $($infNames.Count) catalogs; thumbprint $($cert.Thumbprint)"
     return
@@ -115,6 +146,7 @@ $signTool = Find-KitTool 'signtool.exe'
 $inf2cat = Find-KitTool 'inf2cat.exe'
 Write-Host "SignTool: $signTool"
 Write-Host "Inf2Cat: $inf2cat"
+Write-Host 'SIGN-PHASE 1/4: Prepare isolated CI test certificate'
 
 # A new test certificate is created PER CI run; only its public half is uploaded.
 # A software key is deliberately marked non-exportable.
@@ -126,23 +158,26 @@ $cert = New-SelfSignedCertificate -Type CodeSigningCert `
     -NotAfter (Get-Date).AddDays(30)
 
 if (-not $cert -or -not $cert.HasPrivateKey) { throw 'Failed to create CI test-signing key' }
+Write-Host "Development certificate created: $($cert.Thumbprint)"
 Export-Certificate -Cert $cert -FilePath $publicCertPath -Type CERT -Force | Out-Null
-# Trust only on the ephemeral CI runner, for signature verification.
-Import-Certificate -FilePath $publicCertPath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
-Import-Certificate -FilePath $publicCertPath -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+# Never import an ephemeral test cert into CI Root/TrustedPublisher.
+# Hosted Windows runners can present an interactive trust prompt and hang.
 Write-Host "CI TEST signer thumbprint: $($cert.Thumbprint)"
-Write-Warning 'Test certificate: NOT trusted by Windows guests until deliberately imported.'
+Write-Host 'Skipped Root/TrustedPublisher import on CI (no interactive trust dialog).'
+Write-Warning 'Test certificate is intentionally untrusted in CI and on guest by default.'
 
+Write-Host "SIGN-PHASE 2/4: Sign $($sysFiles.Count) kernel drivers"
 # Embed .sys signatures before creating the catalogs, since catalogs hash driver files.
 foreach ($file in $sysFiles) {
     Invoke-Tool $signTool @('sign', '/fd', 'SHA256', '/sha1', $cert.Thumbprint, '/s', 'My', $file.FullName)
-    Invoke-Tool $signTool @('verify', '/pa', $file.FullName)
+    Assert-TestSignature $file.FullName $cert.Thumbprint
 }
 
 $workRoot = Join-Path $env:RUNNER_TEMP 'vbox-guest-test-signing'
 New-Item -ItemType Directory -Path $workRoot -Force | Out-Null
 $protectedFiles = @($sysFiles | ForEach-Object { $_.Name })
 
+Write-Host 'SIGN-PHASE 3/4: Generate and sign four driver catalogs'
 foreach ($name in $infNames) {
     $infPath = Join-Path $add "$name.inf"
     $text = [IO.File]::ReadAllText($infPath)
@@ -172,12 +207,13 @@ foreach ($name in $infNames) {
     $catalog = Join-Path $packageDir "$name.cat"
     Require-File $catalog
     Invoke-Tool $signTool @('sign', '/fd', 'SHA256', '/sha1', $cert.Thumbprint, '/s', 'My', $catalog)
-    Invoke-Tool $signTool @('verify', '/pa', $catalog)
-    Invoke-Tool $signTool @('verify', '/pa', '/c', $catalog, (Join-Path $packageDir "$name.inf"))
+    Assert-TestSignature $catalog $cert.Thumbprint
+    Assert-CatalogMember $signTool $catalog (Join-Path $packageDir "$name.inf")
     Copy-Item -LiteralPath $catalog -Destination (Join-Path $add "$name.cat") -Force
     Write-Host "CI TEST catalog signed: $name.cat"
 }
 
+Write-Host 'SIGN-PHASE 4/4: Record driver package integrity hashes'
 # Hash signed drivers and exact INF-declared files, not unrelated installer
 # helpers that may be regenerated during the kBuild packing pass.
 $importantFiles = @($protectedFiles) +

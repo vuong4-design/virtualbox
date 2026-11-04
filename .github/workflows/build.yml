@@ -1198,6 +1198,7 @@ jobs:
           }
 
       - name: CI test-sign Guest Additions drivers and generate catalogs
+        timeout-minutes: 15
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
@@ -1231,6 +1232,7 @@ jobs:
           Write-Host "Installer Authenticode status: $($signature.Status) (unsigned CI builds may need trusted signing before guest installation)"
 
       - name: Verify CI test-signed Guest Additions package after NSIS
+        timeout-minutes: 10
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |

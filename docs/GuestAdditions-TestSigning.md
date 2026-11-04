@@ -9,7 +9,13 @@ attestation signing, or a way to run untrusted drivers on production systems.
 1. Compile Windows Guest Additions normally.
 2. Generate a new, **non-exportable**, self-signed code signing key in the hosted
    Windows runner's **CurrentUser\\My** store. This key is not committed or uploaded.
-3. Sign staged `*.sys` driver binaries **before** creating catalog hashes.
+3. Do **not** import the CI test certificate into `Root` or `TrustedPublisher`
+   on GitHub-hosted runners. This can cause an interactive trust prompt and
+   stall the build. Signature verification confirms the signer thumbprint and
+   tolerates only the expected untrusted test root; invalid hashes/signatures
+   still fail. The CI signing step has a **15-minute timeout**, plus four
+   phase markers to diagnose any subsequent stall. Sign staged `*.sys` driver
+   binaries **before** creating catalog hashes.
 4. Add `CatalogFile` to the four staged INF files (`VBoxGuest`, `VBoxMouse`,
    `VBoxVideo`, `VBoxWddm`), and build a separate catalog for each one with
    WDK `Inf2Cat /os:10_RS5_X64`. Use isolated directories so Inf2Cat only sees
