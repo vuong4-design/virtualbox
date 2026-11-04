@@ -20,10 +20,18 @@ attestation signing, or a way to run untrusted drivers on production systems.
    `VBoxVideo`, `VBoxWddm`), and build a separate catalog for each one with
    WDK `Inf2Cat /os:10_RS5_X64`. Use isolated directories so Inf2Cat only sees
    one INF at a time. Sign and verify these catalogs with `SignTool`.
-5. Run `kmk packing` with `VBOX_GA_CI_TESTSIGN=1`, so the NSIS installer extracts
-   each test-signed catalog into the correct driver directory.
-6. Verify that the signed `*.sys`, `*.inf`, and `*.cat` files were not modified
-   by later build/packing steps. A failed signability check fails the CI job.
+5. Before `kmk packing`, verify SHA-256 for every file recorded in
+   `VBoxGATestSigning.json` (including INF-referenced EXEs/DLLs such as
+   `VBoxControl.exe`). Invoke kBuild with `-o FILE` for each protected input:
+   this makes kBuild treat the signed output as already up to date, preventing
+   its packing pass from replacing it with an unsigned build artifact.
+   Re-create the installer using `VBOX_GA_CI_TESTSIGN=1` to embed four
+   signed catalogs. The installer makefile explicitly declares these `.cat`
+   files as prerequisites in CI test-signing mode.
+6. Recompute SHA-256 for all protected files immediately after packing, then
+   verify signed catalogs. If any input still changes, CI fails rather than
+   shipping a mismatched package. **Never fix hash mismatches by skipping
+   verification or editing the signing manifest.**
 
 The downloadable GitHub Actions artifact `virtualbox-guest-additions` contains
 `additions/VBoxWindowsAdditions-amd64.exe`, `additions/VBoxGATestSigner.cer` (PUBLIC

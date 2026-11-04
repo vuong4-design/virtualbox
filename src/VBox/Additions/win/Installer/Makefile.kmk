@@ -313,6 +313,7 @@ $(PATH_STAGE_BIN)/additions/VBoxWindowsAdditions-$(KBUILD_TARGET_ARCH).exe: \
 		$(PATH_SUB_CURRENT)/Languages/French.nsh \
 		$(VBOX_WINDOWS_ADDITIONS_ATTESTATION_SIGNED_FILES) \
 		$(VBOX_WINDOWS_ADDITIONS_OTHER_FILES) \
+		$(if $(VBOX_GA_CI_TESTSIGN),$(addprefix $(PATH_STAGE_BIN)/additions/,VBoxGuest.cat VBoxMouse.cat VBoxVideo.cat VBoxWddm.cat)) \
 		$(VBOX_WINDOWS_ADDITIONS_ICON_FILE) \
 		$(VBOX_NSIS_ICON_FILE) \
 		$(if $(VBOX_SIGNING_MODE),$(PATH_TARGET)/uninst.exe) \

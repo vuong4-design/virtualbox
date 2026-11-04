@@ -1220,10 +1220,50 @@ jobs:
           # direct workspace-relative kBuild target. Use the supported packing pass.
           # VBOX_ONLY_ADDITIONS limits the pass to guest components; suppress ISO
           # creation (which requires installers for other OS/architecture builds).
-          $installer = Join-Path $env:GITHUB_WORKSPACE 'out/win.amd64/release/bin/additions/VBoxWindowsAdditions-amd64.exe'
+          $add = Join-Path $env:GITHUB_WORKSPACE 'out/win.amd64/release/bin/additions'
+          $installer = Join-Path $add 'VBoxWindowsAdditions-amd64.exe'
+          $manifestPath = Join-Path $add 'VBoxGATestSigning.json'
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Missing signing manifest: $manifestPath" }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.Purpose -ne 'CI_TEST_ONLY' -or $manifest.TargetOS -ne '10_RS5_X64') {
+            throw 'Unexpected CI signing manifest or target OS'
+          }
+          # The all-guest kBuild packing pass can try to re-link/re-install
+          # VBoxControl.exe and other signed catalog inputs. That invalidates
+          # Inf2Cat's file hashes (observed after a successful NSIS build).
+          # kBuild's -o/--old-file option prevents these staged outputs from
+          # being rebuilt while still allowing the NSIS packaging recipe.
+          $protectedArgs = @()
+          foreach ($item in $manifest.Files) {
+            $protected = Join-Path $add $item.Name
+            if (-not (Test-Path -LiteralPath $protected -PathType Leaf)) { throw "Missing signed package input: $protected" }
+            $actual = (Get-FileHash -LiteralPath $protected -Algorithm SHA256).Hash
+            if ($actual -ne $item.Sha256) { throw "Signed package input changed BEFORE packing: $protected" }
+            $protectedArgs += '-o'
+            $protectedArgs += [IO.Path]::GetFullPath($protected).Replace('\', '/')
+          }
+          if ($protectedArgs.Count -eq 0) { throw 'Signing manifest has no protected inputs' }
+          Write-Host "Protecting $($protectedArgs.Count / 2) signed catalog inputs from kBuild reconstruction"
+          # An existing installer must never be reused after creating new .cat
+          # files: force NSIS to consume these exact signed inputs.
+          if (Test-Path -LiteralPath $installer) { Remove-Item -LiteralPath $installer -Force }
           Write-Host 'Packaging Windows x64 Guest Additions using kBuild packing pass'
-          & $kmk '-j2' 'VBOX_ONLY_ADDITIONS=1' 'VBOX_WITHOUT_ADDITIONS_ISO=1' 'VBOX_GA_CI_TESTSIGN=1' 'packing'
+          $kmkArgs = @('-j2') + $protectedArgs + @(
+            'VBOX_ONLY_ADDITIONS=1',
+            'VBOX_WITHOUT_ADDITIONS_ISO=1',
+            'VBOX_GA_CI_TESTSIGN=1',
+            'packing'
+          )
+          & $kmk @kmkArgs
           if ($LASTEXITCODE -ne 0) { throw "NSIS Guest Additions packing pass failed (kmk exit=$LASTEXITCODE)" }
+          # Fail immediately if any file was unexpectedly altered by kBuild.
+          foreach ($item in $manifest.Files) {
+            $protected = Join-Path $add $item.Name
+            if ((Get-FileHash -LiteralPath $protected -Algorithm SHA256).Hash -ne $item.Sha256) {
+              throw "Signed package input modified DURING packing: $protected"
+            }
+          }
+          Write-Host 'Signed catalog inputs unchanged throughout kBuild packing: PASS'
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing packaged Guest Additions installer: $installer" }
           $file = Get-Item -LiteralPath $installer
           if ($file.Length -lt 1MB) { throw "Guest Additions installer is too small ($($file.Length) bytes): $installer" }
