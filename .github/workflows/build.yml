@@ -1203,6 +1203,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
+          & .\.github\scripts\Test-CatalogVerification.ps1
           # Ephemeral self-signed development certificate, never a production signature.
           & .\.github\scripts\TestSign-GuestAdditions.ps1 -AdditionsDir 'out\win.amd64\release\bin\additions' -TargetOS '10_RS5_X64'
 

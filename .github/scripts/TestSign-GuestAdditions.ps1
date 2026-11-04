@@ -85,18 +85,28 @@ function Assert-TestSignature([string] $file, [string] $thumbprint) {
     }
     Write-Host "TEST SIGNATURE OK: $(Split-Path $file -Leaf) (trust=$($sig.Status); signer=$($signer.Thumbprint))"
 }
+function Test-CatalogUntrustedRootOnly([string] $message) {
+    # SignTool wraps messages and may double spaces in its verbose output.
+    # Require positive catalog membership and the exact expected trust error;
+    # never suppress missing membership, hash mismatches, or extra errors.
+    $flat = [regex]::Replace($message, '\s+', ' ')
+    $hasCatalogMember = $flat -match '(?i)\bFile is signed in catalog:\s+\S+'
+    $hasMemberHash = $flat -match '(?i)\bHash of file \((sha1|sha256)\):\s*[0-9a-f]{40,64}\b'
+    $hasUntrustedRoot = $flat -match '(?i)SignTool Error:\s*A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider\.'
+    $hasFileNotValid = $flat -match '(?i)SignTool Error:\s*File not valid:'
+    $errorCount = [regex]::Matches($flat, '(?i)SignTool Error:').Count
+    return ($hasCatalogMember -and $hasMemberHash -and $hasUntrustedRoot -and $hasFileNotValid -and $errorCount -eq 2)
+}
 function Assert-CatalogMember([string] $signTool, [string] $catalog, [string] $inf) {
-    # SignTool validates catalog membership and its hashes before chain trust.
-    # Only a known UNTRUSTED TEST ROOT is tolerated, not a hash/signature error.
+    # SignTool verifies catalog membership and hashes before chain trust.
     $verifyOutput = @(& $signTool verify /pa /v /c $catalog $inf 2>&1 | ForEach-Object { $_.ToString() })
     $verifyExit = $LASTEXITCODE
     $message = $verifyOutput -join [Environment]::NewLine
     if ($verifyExit -eq 0) { Write-Host "Catalog member verified: $inf"; return }
-    $untrustedRoot = $message -match '(?i)0x800b0109|0x800b010a|CERT_E_UNTRUSTEDROOT|a root certificate which is not trusted|certificate chain.*untrusted'
-    if (-not $untrustedRoot) {
+    if (-not (Test-CatalogUntrustedRootOnly $message)) {
         throw "Catalog member verification failed for $inf (exit=$verifyExit): $message"
     }
-    Write-Host "Catalog member tested; CI self-signed root intentionally untrusted: $inf"
+    Write-Host "Catalog member found and hashed; only test-root trust failed (expected on CI): $inf"
 }
 if ($VerifyOnly) {
     Require-File $manifestPath
