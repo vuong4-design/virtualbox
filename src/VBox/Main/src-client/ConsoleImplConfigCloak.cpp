@@ -31,6 +31,7 @@
 #include "ConsoleImpl.h"
 #include "ConsoleImplConfigCloak.h"
 #include "ConsoleImplConfigCloakCfgm.h"
+#include "ConsoleImplConfigCloakStorage.h"
 
 #include <VBox/com/Guid.h>
 #include <VBox/err.h>
@@ -108,6 +109,7 @@ static const MACHINEPROFILE *cloakGetLabProfile(void)
         Profile.pszProcManufacturer = "GenuineIntel";
         Profile.pszAcpiOemId = "LAB";
         Profile.pszAcpiOemTabId = "LAB0";
+        Profile.pszAtaModel = "LAB ATA DISK";
         Profile.uI440FxVendorId = 0x8086;
         Profile.uI440FxDeviceId = 0x1237;
         Profile.uPiix3IsaDeviceId = 0x7000;
@@ -268,7 +270,7 @@ static CLOAKCFGMVTABLE cloakCreateCfgmVTable(PCVMMR3VTABLE pVMM)
 
 int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *pMachine)
 {
-    RT_NOREF(pVirtualBox, pMachine);
+    RT_NOREF(pVirtualBox);
 
     PCFGMNODE pCloak = mpVMM->pfnCFGMR3GetChild(pRoot, "Cloak");
     if (!pCloak)
@@ -509,6 +511,125 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
     {
         LogRel(("Cloak: effective profile '%s' is inconsistent, vrc=%Rrc\n", pProfile->pszProfileId, vrc));
         return vrc;
+    }
+
+    /* Opt-in: a new host binary must not silently change boot disk identity. */
+    bool fLabStorageEnabled = false;
+    if (fLabProfile)
+    {
+        vrc = cloakQueryBool(mpVMM, pCloak, "StorageLabEnabled", &fLabStorageEnabled);
+        if (vrc == VERR_CFGM_VALUE_NOT_FOUND)
+            fLabStorageEnabled = false;
+        else if (RT_FAILURE(vrc))
+            return vrc;
+    }
+    /* S0/S1 lab: enumerate actual attached media, not guessed guest bus IDs. */
+    if (fLabProfile && pProfile->pszAtaModel)
+    {
+        com::SafeIfaceArray<IStorageController> Controllers;
+        HRESULT hrc = pMachine->COMGETTER(StorageControllers)(ComSafeArrayAsOutParam(Controllers));
+        if (FAILED(hrc))
+            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+
+        unsigned cApplied = 0, cEligible = 0, cUnsupported = 0;
+        for (size_t i = 0; i < Controllers.size(); ++i)
+        {
+            StorageControllerType_T enmCtrl;
+            hrc = Controllers[i]->COMGETTER(ControllerType)(&enmCtrl);
+            if (FAILED(hrc))
+                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+            const char *pszDevice = i_storageControllerTypeToStr(enmCtrl);
+            if (!pszDevice)
+                return VERR_NOT_SUPPORTED;
+            bool const fSupported = !RTStrCmp(pszDevice, "ahci") || !RTStrCmp(pszDevice, "piix3ide");
+            ULONG uInstance = 0;
+            Bstr bstrCtrlName;
+            hrc = Controllers[i]->COMGETTER(Instance)(&uInstance);
+            if (FAILED(hrc))
+                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+            hrc = Controllers[i]->COMGETTER(Name)(bstrCtrlName.asOutParam());
+            if (FAILED(hrc))
+                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+            com::SafeIfaceArray<IMediumAttachment> Attachments;
+            hrc = pMachine->GetMediumAttachmentsOfController(bstrCtrlName.raw(), ComSafeArrayAsOutParam(Attachments));
+            if (FAILED(hrc))
+                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+
+            for (size_t j = 0; j < Attachments.size(); ++j)
+            {
+                DeviceType_T enmType;
+                hrc = Attachments[j]->COMGETTER(Type)(&enmType);
+                if (FAILED(hrc))
+                    return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                if (enmType != DeviceType_HardDisk)
+                    continue;  /* optical, USB and SCSI are S3 work */
+                if (!fSupported)
+                {
+                    cUnsupported++;
+                    continue;
+                }
+                cEligible++;
+
+                LONG iPort = -1, iDevice = -1;
+                hrc = Attachments[j]->COMGETTER(Port)(&iPort);
+                if (FAILED(hrc))
+                    return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                hrc = Attachments[j]->COMGETTER(Device)(&iDevice);
+                if (FAILED(hrc))
+                    return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                char szSlot[32];
+                vrc = CloakStorageGetSlot(pszDevice, iPort, iDevice, szSlot, sizeof(szSlot));
+                if (RT_FAILURE(vrc))
+                    return vrc;
+                LogRel(("Cloak: S0 detected HDD %s/%u/%s (medium ID redacted)\n",
+                        pszDevice, uInstance, szSlot));
+                if (!fLabStorageEnabled)
+                    continue; /* S0 inventory only; no disk identity changes. */
+
+                PCFGMNODE pControllerCfg = mpVMM->pfnCFGMR3GetChildF(pRoot, "Devices/%s/%u/Config",
+                                                                       pszDevice, uInstance);
+                if (!pControllerCfg)
+                    return VERR_NOT_FOUND;
+                PCFGMNODE pSlotCfg = mpVMM->pfnCFGMR3GetChild(pControllerCfg, szSlot);
+                if (!pSlotCfg)
+                {
+                    vrc = mpVMM->pfnCFGMR3InsertNode(pControllerCfg, szSlot, &pSlotCfg);
+                    if (RT_FAILURE(vrc))
+                        return vrc;
+                }
+
+                ComPtr<IMedium> pMedium;
+                hrc = Attachments[j]->COMGETTER(Medium)(pMedium.asOutParam());
+                if (FAILED(hrc) || pMedium.isNull())
+                    return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                Bstr bstrMediumId;
+                hrc = pMedium->COMGETTER(Id)(bstrMediumId.asOutParam());
+                if (FAILED(hrc))
+                    return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                Utf8Str strMediumId(bstrMediumId);
+                char szSerial[21];
+                vrc = CloakStorageLabSerial(u64Serial, strMediumId.c_str(), szSerial, sizeof(szSerial));
+                if (RT_FAILURE(vrc))
+                    return vrc;
+                CLOAKSTORAGEDEVICEIDENTITY Identity = { pProfile->pszAtaModel, "LAB1", szSerial };
+                vrc = CloakStorageMaterialize(&Cfgm, pSlotCfg, &Identity);
+                RTMemWipeThoroughly(szSerial, sizeof(szSerial), 3);
+                if (RT_SUCCESS(vrc))
+                    vrc = CloakStorageValidateEffective(&Cfgm, pSlotCfg);
+                if (RT_FAILURE(vrc))
+                {
+                    LogRel(("Cloak: invalid lab storage config at %s/%u/%s, vrc=%Rrc\n",
+                            pszDevice, uInstance, szSlot, vrc));
+                    return vrc;
+                }
+                cApplied++;
+                LogRel(("Cloak: lab storage %s/%u/%s materialized (serial redacted)\n",
+                        pszDevice, uInstance, szSlot));
+            }
+        }
+        LogRel(("Cloak: lab storage inventory: %u eligible ATA/AHCI HDD(s), %u unsupported HDD(s), "
+                "%u materialized; StorageLabEnabled=%RTbool\n",
+                cEligible, cUnsupported, cApplied, fLabStorageEnabled));
     }
 
     try

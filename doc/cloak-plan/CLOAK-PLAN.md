@@ -4,7 +4,7 @@
 >
 > **Mục tiêu:** xây dựng kế hoạch sửa mã nguồn VirtualBox để hiện thực hoá các lớp "cloak" (đổi identity mà guest nhìn thấy) đã được xác nhận trong tài liệu phân tích.
 >
-> **Trạng thái: KẾ HOẠCH — chưa triển khai code.** 5 quyết định thiết kế đã chốt tại [§10](#10-quyết-định-đã-chốt):
+> **Trạng thái: tài liệu kế hoạch đang triển khai.** PR-1/MPE nền tảng đã có trong source; profile thử nghiệm `lab-dmi-v1` đã được Windows guest xác minh DMI và bốn ACPI OEM header. Storage Identity hiện vẫn là phần cần triển khai trong PR-3 (§4.5.12). Các phần production bị chặn bởi provenance, compatibility và kiểm thử T3 theo §10.6. 5 quyết định thiết kế đã chốt tại [§10](#10-quyết-định-đã-chốt):
 > (1) chia 6 PR theo vertical slice, (2) identity phải **đồng bộ** → Machine Profile Engine, (3) selector **random nhưng ổn định** bằng `CloakSeed` + VM UUID, (4) build qua **GitHub Actions + T3 self-hosted**, (5) `CloakEnabled=off` chỉ tắt lớp runtime; build-time asset phải dùng build stock riêng.
 >
 > **Không nằm trong phạm vi:** các payload ở tầng ISO/script của bản fork (AutoKMS crack, hosts-blocklist chống anti-fraud, browser-profile forgery, driver test-signing). Đó là tài nguyên của `cloak/Iso/`, không phải mã nguồn VirtualBox.
@@ -467,7 +467,7 @@ typedef struct MACHINEPROFILE
     const char *pszEdidSerial;
 
     /* --- Storage --- */
-    const char *pszAtaModel;          /* "Samsung PRO 970"          */
+    const char *pszAtaModel;          /* ATA model; phải khớp loại bus */
     const char *pszAtapiVendor;       /* "Samsung"                  */
     const char *pszAtapiProduct;      /* "CD-ROM"                   */
     const char *pszInquiryVendor;     /* "Samsung"                  */
@@ -730,6 +730,47 @@ MPE kiểm tra trước khi materialize:
 6. `VBoxInternal/Cloak/Profile` **không** được bỏ qua các kiểm tra trên.
 
 Test bắt buộc: manifest khớp; manifest sai family; manifest sai chipset; manifest `stock` + cloak; manifest hash sai. T1 đọc `build-identity.json` và so với binary/expected; T3 đọc runtime manifest qua debug info.
+
+#### 4.5.12 Storage Identity end-to-end — bổ sung sau kiểm thử VM `test` (2026-11-04)
+
+**Bằng chứng runtime:** Trên VM `test`, Windows guest đã xác nhận DMI `LabVendor/LabDesktop-01`, BIOS `LabFirmware/LAB-1.0`, và các ACPI OEM header DSDT/FADT/RSDT/SSDT có `LAB___/LAB0*`. Guest Additions chính hãng đã chạy với `VBoxGuest` và `VBoxService`. Riêng ổ đĩa số 0 vẫn có `Model=VBOX HARDDISK`, `FirmwareRevision=1.0`, `InterfaceType=IDE`, `PNPDeviceID=SCSI\DISK&VEN_VBOX&PROD_HARDDISK\\...`. Đây là **residual storage identity**, không phải bằng chứng VM thật đang dùng controller SCSI: Windows có thể biểu diễn thiết bị ATA/AHCI qua định danh kiểu SCSI.
+
+**Khoảng trống thực thi:** `MACHINEPROFILE` đã khai báo `pszAtaModel`, `pszAtapiVendor`, `pszAtapiProduct`, `pszInquiryVendor`, `pszInquiryProduct`, `pszStorageSerial`, `uNonRotational`, `fTrimSupported`, `fSmartSupported`; tuy nhiên `CloakCfgmMaterializeProfile()` hiện mới điền DMI/ACPI (`ConsoleImplConfigCloakCfgm.h`). **Chưa có Storage materializer/validator end-to-end**, và chưa có cơ chế map từng medium với logical drive/slot có thể kiểm chứng. Đổi literal `VBOX HARDDISK` trong một device hoặc chỉ set `Port0` không đáp ứng C5.
+
+**Thiết kế bắt buộc, gắn vào MPE (§4.5.5):**
+
+1. **Inventory trước khi ghi CFGM:** từ graph của VM (storage controller, controller instance, bus, port, device, medium UUID/type, HDD/optical/removable), dựng bảng `StorageAttachmentBinding` cho mọi medium đang gắn; kiểm tra layout trong VM `test` bằng `VBoxManage showvminfo --machinereadable`, storage attachment và guest PnP parent chain. Không suy bus thật chỉ từ `Win32_DiskDrive.InterfaceType=IDE` hay prefix `SCSI\DISK`. Không giả định luôn là `ahci/0/Port0`; cũng không chỉ cấu hình một disk rồi tuyên bố toàn diện.
+2. **Profile logic theo từng drive:** giữ nhóm field storage legacy để tương thích test cũ, nhưng bổ sung collection `StorageDeviceIdentity[]` keyed bằng một **stable logical drive ID** được provision khi VM đã poweroff (không lấy slot làm identity lâu dài). Mỗi entry có `kind` (HDD/SSD/optical/removable), `protocol` (ATA/ATAPI/SCSI), model, vendor/product INQUIRY, firmware, serial, WWN/VPD 0x80/0x83 nếu backend hỗ trợ, medium binding, nonrotational, TRIM, SMART, provenance. Nhiều ổ có identity riêng; cấu hình chưa đủ trường hoặc loại medium sai → fail-fast cho profile `COMPATIBLE`.
+3. **Materialize một lần sau overlay:** MPE (`VBoxC`) resolve `StorageDeviceIdentity[]` vào CFGM **node thực** của attachment trước khi các device được construct. `DevATA.cpp` đọc `PrimaryMaster/PrimarySlave/SecondaryMaster/SecondarySlave` khi PIIX3; `DevAHCI.cpp` đọc `PortN/ModelNumber`, `SerialNumber`, `FirmwareRevision` khi AHCI. Mapping phải lấy từ graph, không hardcode port. `ConsoleImplConfigX86.cpp` hiện gọi `i_configStorageCtrls` trước `i_configCfgmOverlay` và `i_configCloak`; phải kiểm chứng node đã hình thành ở thời điểm materialize và không bị recreate sau đó. MPE chỉ điền key chưa có; user ExtraData override thắng **nhưng** bắt buộc validate effective identity sau override.
+4. **Đồng bộ các surface:** ATA IDENTIFY (`DevATA.cpp`, `DevAHCI.cpp`) ↔ tên/model mà Windows WMI/PnP quan sát ↔ SCSI INQUIRY/VPD khi backend thực sự có mặt (`Storage/VSCSI/VSCSILunSbc.cpp`, `VSCSILunMmc.cpp`, `DrvHostDVD.cpp`, USB MSD). Không suy luận `SCSI\DISK` trong Windows đồng nghĩa `VSCSI` path được dùng. Với ATAPI/optical: IDENTIFY/INQUIRY vendor/product/revision phải thuộc cùng một profile; thiết bị pass-through cần chính sách riêng, không giả mạo thông tin từ ổ vật lý của host.
+5. **Serial và saved state:** tạo serial theo domain-separated KDF của §4.6 trên `CloakSeed`, VM UUID và stable logical drive ID; provision/persist mapping **trước VM start**, không sinh mới mỗi boot, không log seed/serial thô. Kiểm tra cold boot 3 lần, snapshot/restore, attach/detach, đổi port, clonevm (UUID mới) và rollback. Saved state khác storage identity phải fail rõ; tránh đổi identity đột ngột của ổ hệ thống đang chạy.
+6. **Capabilities phải trung thực:** C5 kiểm ATA rotation (IDENTIFY word 217), TRIM/Data Set Management, SMART/support+enable, SCSI MODE SENSE/VPD tương ứng. Không tự gán tên SSD thương mại khi backend không khớp tính năng; không thay transport/firmware/protocol hay báo NVMe khi device vẫn là PIIX3/AHCI. Chỉ đặt `nonrotational/TRIM/SMART` khi backend thực sự thực hiện hoặc báo đúng các capability này. Controller PCI DID của AHCI là **binding mềm**: giữ `8086:2829` ở baseline, chỉ đổi bằng allowlist đã test Windows/Linux driver; không thay VMMDev `80EE:CAFE` hoặc VGA `80EE:BEEF` (binding cứng).
+7. **Compatibility và provenance:** profile lab dùng định danh tổng hợp có ghi `DRAFT/lab-only`, không giả làm ổ thật của nhà sản xuất khác. Production vẫn tuân O4/O5, C5/C9/C12/C13 và `BuildIdentityManifest`; **không** biến `lab-dmi-v1` thành `COMPATIBLE` chỉ vì WMI/ACPI pass. `CloakEnabled=off` phải giữ nguyên storage runtime mặc định ở build hiện tại; phần build-time vẫn theo §4.5.9.
+
+**Ma trận sink cần kiểm (PR-3 storage slice):**
+
+| Controller/backend | Sink / vị trí nguồn đã kiểm | Giá trị cần thống nhất | Tiêu chí |
+|---|---|---|---|
+| PIIX3 ATA/ATAPI | `Storage/DevATA.cpp:8231-8232`, `:8208` | `ModelNumber`, serial, firmware, ATA IDENTIFY, optical INQUIRY | Model chuẩn; không mismatch optical |
+| AHCI HDD/ATAPI | `Storage/DevAHCI.cpp:5414-5456`, `:5370` | `PortN/ModelNumber`, serial, firmware, ATAPI INQUIRY | Per-port đúng, không ảnh hưởng ổ khác |
+| VSCSI SBC/MMC/SSC | `Storage/VSCSI/VSCSILunSbc.cpp`, `VSCSILunMmc.cpp`, `VSCSILunSsc.cpp` | INQUIRY vendor/product/rev, VPD khi dùng backend này | Không còn `VBOX` bất ngờ trên drive đã profile hóa |
+| HostDVD / USB MSD | `Storage/DrvHostDVD.cpp`, `Storage/UsbMsd.cpp` | fallback và descriptor/INQUIRY | Thiết bị host pass-through được xử lý riêng |
+| Windows guest | `Win32_DiskDrive`, `PNPDeviceID`, `MSFT_Disk`, device parent | model/firmware/serial/transport | So với ATA/SCSI raw; boot và driver ổn định |
+| Linux guest | `lsblk -o NAME,MODEL,SERIAL,ROTA,TRAN`, `udevadm`, `smartctl -i/-a` nếu supported | model/serial/flags | Dữ liệu khớp, không ATA/SCSI lỗi |
+
+**Vertical slice và acceptance gate:**
+
+| Slice | Công việc bổ sung | Gate bắt buộc trước khi coi PASS |
+|---|---|---|
+| S0 — Inventory | Guest/host collector ghi controller → attachment → model/serial/capabilities; fixture có 1 HDD SATA, 1 IDE, 1 optical, multi-disk | Không còn suy sai bus từ chuỗi `SCSI\DISK`; baseline redacted |
+| S1 — MPE graph + per-disk CFGM | `StorageDeviceIdentity[]`, resolver từng medium, materialize trước device construct, negative tests invalid port/overrides | T1/unit+T2 schema; không hardcode `Port0`, `C5` strict |
+| S2 — ATA/AHCI primary | Model/serial/firmware/IDENTIFY; giữ nguyên controller PCI ID và partition/disk data | Windows+Linux boot; model/serial đúng; 3 cold boot giữ ổn định; snapshot/clone |
+| S3 — INQUIRY + capabilities | ATAPI/VSCSI/USB/HostDVD chỉ khi present; SSD rotation/TRIM/SMART; SCSI VPD | C5 positive/negative, không mixed vendor/transport; raw và WMI/PnP nhất quán |
+| S4 — Regression+evidence | T3 3 boot, differential stock/runtime-off/runtime-on, disks/GA/graphics/network/clipboard, redaction | Không yellow-bang/BSOD, VBoxService và signed GA chạy, không leak seed/serial vào artifact |
+
+**Implementation note — S0/S1 LAB (chưa phải PR-3 production):** `ConsoleImplConfigCloakStorage.h` bổ sung resolver IDE/AHCI + per-attachment model/firmware/serial, `i_configCloak()` duyệt COM controller/medium graph sau overlay, không hardcode `Port0`. `VBoxInternal/Cloak/StorageLabEnabled` mặc định tắt để nâng cấp host không âm thầm đổi serial ổ khởi động; phải bật rõ khi VM poweroff qua `.github/scripts/Set-CloakLabStorage.ps1`. Serial thử nghiệm dựa seed stream + medium UUID, **chưa** có logical drive ID được provision/persist độc lập với medium UUID và **chưa** bảo đảm ổn định khi snapshot tạo differencing medium mới. `tstCloakConfig` đã bổ sung case slot routing, multiple-drive separation, override và invalid config; CI chưa chạy sau bản thay đổi này. S2/S3 C5 đầy đủ và T3 vẫn phải hoàn thành trước production.
+
+**Điều kiện để gắn nhãn `STORAGE_RUNTIME_PASS`:** có host build thành công; VM `test` đã cold boot dưới chính binary đó; Windows và Linux collector xác nhận model, serial, firmware, capabilities, các PnP/INQUIRY surface áp dụng được; không có lỗi binding/boot và không có STRICT C5. Chỉ đổi `ModelNumber` hoặc một trường WMI **không đủ**. Phần chưa hỗ trợ phải ghi `RESIDUAL` kèm nguyên nhân và phạm vi, không tuyên bố toàn bộ VirtualBox đã hết dấu vết.
 
 ---
 
@@ -1668,7 +1709,7 @@ Chi tiết CI: xem [§4.7](#47-ci-bằng-github-actions-quyết-định-4).
 | 2.1 | GPU `GpuModelId` | `Graphics/DevVGA.cpp:6829-6843` | Chỉ dùng khi có WDDM strategy; nếu không, giữ `80EE:BEEF` |
 | 2.2 | VMSVGA `CMD_BUFFERS_2` | `Graphics/DevVGA-SVGA.cpp:8074-8089` | bỏ bit 0x04000000 |
 | 2.3 | HDA codec/subsystem | `Audio/DevHdaCodec.cpp:801-804`, `Audio/DevHda.cpp:5138-5141` | bảng hợp lệ theo profile, không dùng tuple lỗi |
-| 2.4 | PIIX3 ATA model | `Storage/DevATA.cpp:8231-8232` | `Samsung PRO 970` / `Samsung CD-ROM` |
+| 2.4 | PIIX3 ATA model | `Storage/DevATA.cpp:8231-8232` | **Profile-derived, đúng giao thức ATA/ATAPI**; không dùng `Samsung 970 PRO` (NVMe) làm model PIIX3 chỉ để đổi literal; optical phải đồng bộ INQUIRY |
 | 2.5 | AHCI controller | `Storage/DevAHCI.cpp:5769-5770` | Profile-derived; `8086:8C82` chỉ đúng cho 8-series, không dùng cho Tiger Lake |
 | 2.6 | AHCI model/serial/INQUIRY | `Storage/DevAHCI.cpp:5414-5456` | Model/serial/INQUIRY phải cùng hãng; dùng `pszStorageSerial` |
 | 2.7 | HostDVD inquiry | `Storage/DrvHostDVD.cpp:366-368` | `Hitachi/CD-ROM/1.0` |
@@ -1685,9 +1726,13 @@ Chi tiết CI: xem [§4.7](#47-ci-bằng-github-actions-quyết-định-4).
 | 2.18 | E1000 subsystem + EEPROM | `Network/DevE1000.cpp:267-281`, `:706-717` | `1043:85F0` (SVID:SID); verify endian/EEPROM |
 | 2.19 | TPM `INTC/CSME/PTT` | `src/libs/libtpms-0.10.2/src/tpm2/VendorInfo.c:71-77` | 4 hằng; chỉ dùng với CPU Intel; **defer PR-6** cùng libtpms |
 
+**Bổ sung Storage Identity cho PR-3:** task 2.4, 2.6, 2.7 và 2.10 **không** được nghiệm thu bằng cách đổi một literal hay duy nhất `Port0/ModelNumber`. Thực hiện theo S0 → S4 tại **§4.5.12**: discovery attachment, identity per-disk qua MPE, ATA/ATAPI/SCSI INQUIRY, TRIM/SMART/rotation, provenance, T1/T2/T3 và regression Guest Additions. Giữ controller ID/binding như stock trong lần thử đầu; chỉ chỉnh binding mềm khi có allowlist và test driver.
+
 **Loại khỏi baseline:** 2.16 và 2.17. Nếu muốn thử, tách branch `experimental/virtio-realtek`; phải test Linux `virtio_pci` + Windows NetKVM/viostor trước khi merge. Không đưa vào PR-3.
 
 ### Phase 3 — Guest Additions camouflage
+
+> **Quyết định thử nghiệm hiện tại (2026-11-04):** user giữ **Guest Additions Oracle chính hãng** để tránh driver test-signing. Vì vậy **PR-4/GA rename được hoãn**, không phụ thuộc vào việc hoàn thành Storage Identity PR-3; VMMDev `80EE:CAFE`, VGA/WDDM binding và các interface GA vẫn giữ nguyên. Phần bên dưới là backlog ban đầu, không phải chỉ thị thay driver ngay.
 
 Đổi tên trong: tên file, tên service, tên registry key, `FileDescription`/`ProductName` trong PE VersionInfo, và `PCI\VEN_...&DEV_...` trong INF.
 
@@ -2044,6 +2089,18 @@ Chỉ bắt đầu code identity khi:
 ---
 
 ## 11. Trạng thái triển khai
+
+**Cập nhật runtime lab 2026-11-04 (bằng chứng người dùng cung cấp, không phải CI T3):**
+
+| Lớp | Quan sát trên Windows guest `test` | Kết luận giới hạn |
+|---|---|---|
+| DMI/SMBIOS | `LabVendor / LabDesktop-01`, `LabFirmware / LAB-1.0` | PASS các trường đã đo |
+| ACPI header | `DSDT LAB___/LAB0DSDT`; `SSDT LAB___/LAB0CPUT`; `FADT LAB___/LAB0FACP`; `RSDT LAB___/LAB0XSDT` | PASS metadata 4 bảng đã đo; không suy ra toàn bộ AML |
+| Guest Additions Oracle | `VBoxGuest`, `VBoxMouse`, `VBoxSF`, `VBoxWddm` và `VBoxService` từng ở trạng thái Running, chữ ký `VBoxGuest.sys` Valid | PASS ở lần đo driver trước đó; cần regression sau PR-3 |
+| Storage | `VBOX HARDDISK`; `SCSI\DISK&VEN_VBOX&PROD_HARDDISK`; firmware `1.0` | **RESIDUAL / chưa triển khai storage MPE**; không xác định controller thực chỉ bằng `InterfaceType=IDE` |
+| PR-3 Storage | Đã thêm bản lab thử nghiệm per-attachment IDE/AHCI model/firmware/serial, mặc định tắt; **chưa build/runtime verify** | **S0/S1 LAB IMPLEMENTED / UNVERIFIED**, S2–S4 và C5 đầy đủ vẫn pending |
+
+**Phạm vi:** kết quả lab không làm thay đổi điều kiện `COMPATIBLE` của production, O4/O5/O9 và T3 Windows/Linux tại §10.6. Không đếm số bảng ACPI đổi tên hay WMI model như bằng chứng đã hoàn thành toàn bộ cloak.
 
 ```
 [x] Đọc tài liệu cloak/           → mục 1

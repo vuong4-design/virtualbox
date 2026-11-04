@@ -116,6 +116,64 @@ misrepresent it as a production firmware provenance record.
    rewrite. **Do not claim ACPI full-pass until Windows guest results
    confirm it.** The build CI only verifies code presence/compilation.
 
+
+
+## Optional lab Storage Identity (S0/S1)
+
+Storage lab is **OFF by default**, even if the VM already uses `lab-dmi-v1`.
+It does not change device PCI IDs, Guest Additions or disk contents. It may
+change guest-visible ATA model/firmware/serial after the next cold boot, which
+can cause Windows to re-enumerate the disk. Always take a VM snapshot/backup.
+
+- S0 enumerates **actual** VM storage controllers and medium attachments via
+  `IMachine` COM (controller type/instance, port/device, hard-disk type).
+  It does not infer the bus from Windows `SCSI\\DISK` or `InterfaceType`.
+- S1 is a **lab-only limited implementation**: hard-disk attachments on
+  PIIX3/PIIX4/ICH6 IDE and AHCI are routed to `PrimaryMaster` /
+  `PrimarySlave` / `SecondaryMaster` / `SecondarySlave` or `PortN`
+  CFGM nodes. Optical, USB, SCSI, SAS, VirtIO and NVMe are not modified.
+- Every eligible HDD receives generic `ModelNumber=LAB ATA DISK`,
+  `FirmwareRevision=LAB1`, and an 18-character lab serial derived from
+  the VM seed stream and the attached **medium UUID**. This distinguishes
+  multiple disks, remains stable across ordinary cold boots and stays
+  independent of controller port. The serial is not logged.
+- User ExtraData overrides are not overwritten, but the effective
+  `ModelNumber` (max 40), `FirmwareRevision` (max 8), and `SerialNumber`
+  (max 20) must be valid and nonempty, otherwise VM startup fails.
+- **Limit:** a medium UUID may change due to snapshot/differencing/media
+  replacement. A production-grade logical drive ID provisioner and extended
+  saved-state guard are **not yet implemented**. C5 checks for
+  INQUIRY/SMART/TRIM/nonrotation and cross-platform S3/S4 testing are pending.
+  Do not mark Storage Identity production-complete.
+
+On the **host**, shut down VM `test` entirely (state `poweroff`). Run:
+
+```powershell
+cd D:\virtualbox
+$vbm = 'C:\path\to\same-custom-build\VBoxManage.exe'
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Status -VM test -VBoxManage $vbm
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Enable -VM test -VBoxManage $vbm -WhatIf
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Enable -VM test -VBoxManage $vbm
+```
+
+Use a **new host artifact** after CI confirms `tstCloakConfig` and that
+`VBoxC.dll` contains `StorageLabEnabled` and `LAB ATA DISK`.
+Cold-boot the guest. Then run `Test-CloakLabStorageGuest.ps1` as Administrator
+inside the Windows guest. You should see `LAB ATA DISK` / `LAB1` for IDE/AHCI
+HDDs, and `VBoxService`/official `VBoxGuest` should still work. Disk serials,
+raw medium UUIDs and seeds are deliberately not printed.
+
+**Rollback:** power off VM `test` completely and run:
+
+```powershell
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Disable -VM test -VBoxManage $vbm
+```
+
+Cold-boot again. The original VirtualBox ATA defaults are restored if no user
+ExtraData overrides exist. Do not resume a saved VM across changes of storage
+identity. This S1 test is **separate** from the full S0–S4 PR-3 plan in
+`doc/cloak-plan/CLOAK-PLAN.md`.
+
 ## Roll back safely
 
 Shut down the guest fully, then on the host:

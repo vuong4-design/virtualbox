@@ -27,6 +27,7 @@
 
 #include "ConsoleImplConfigCloak.h"
 #include "ConsoleImplConfigCloakCfgm.h"
+#include "ConsoleImplConfigCloakStorage.h"
 
 #include <iprt/test.h>
 #include <iprt/uuid.h>
@@ -1077,6 +1078,81 @@ static void testCfgmMaterialization(RTTEST hTest)
     testCfgmDestroy(&CfgmError);
 }
 
+static void testStorageLabMaterialization(RTTEST hTest)
+{
+    RTTestSub(hTest, "Lab storage attachment routing and per-medium identity");
+    char szSlot[32];
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("ahci", 0, 0, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "Port0"));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("ahci", 5, 0, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "Port5"));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 0, 0, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "PrimaryMaster"));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 0, 1, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "PrimarySlave"));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 1, 0, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "SecondaryMaster"));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 1, 1, szSlot, sizeof(szSlot)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSlot, "SecondarySlave"));
+    RTTESTI_CHECK(RT_FAILURE(CloakStorageGetSlot("ahci", 5, 0, szSlot, 3)));
+    RTTESTI_CHECK(RT_FAILURE(CloakStorageGetSlot("piix3ide", 0, 0, szSlot, 3)));
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("ahci", -1, 0, szSlot, sizeof(szSlot)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("ahci", 0, 1, szSlot, sizeof(szSlot)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 2, 0, szSlot, sizeof(szSlot)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("piix3ide", 0, 2, szSlot, sizeof(szSlot)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageGetSlot("lsilogic", 0, 0, szSlot, sizeof(szSlot)), VERR_NOT_SUPPORTED);
+    RTTESTI_CHECK_RC(CloakStorageGetSlot(NULL, 0, 0, szSlot, sizeof(szSlot)), VERR_INVALID_PARAMETER);
+
+    char szSerialA[21], szSerialA2[21], szSerialB[21], szSerialOtherVm[21];
+    const char *pszMediumA = "11111111-2222-3333-4444-aabbccddeeff";
+    const char *pszMediumB = "99999999-2222-3333-4444-555555555555";
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef), pszMediumA,
+                                            szSerialA, sizeof(szSerialA)), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef), pszMediumA,
+                                            szSerialA2, sizeof(szSerialA2)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSerialA, szSerialA2));
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef),
+                                            "11111111-2222-3333-4444-AABBCCDDEEFF",
+                                            szSerialA2, sizeof(szSerialA2)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSerialA, szSerialA2));
+    RTTESTI_CHECK(strlen(szSerialA) == 18);
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef), pszMediumB,
+                                            szSerialB, sizeof(szSerialB)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szSerialA, szSerialB) != 0);
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdee), pszMediumA,
+                                            szSerialOtherVm, sizeof(szSerialOtherVm)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szSerialA, szSerialOtherVm) != 0);
+    RTTESTI_CHECK(RT_FAILURE(CloakStorageLabSerial(42, "bad-uuid", szSerialA2, sizeof(szSerialA2))));
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(42, pszMediumA, szSerialA2, 5), VERR_INVALID_PARAMETER);
+
+    TESTCFGM Cfgm = {};
+    TESTCFGMNODE *pDiskA = testCfgmAddNode(&Cfgm, "Devices/ahci/0/Config/Port0");
+    TESTCFGMNODE *pDiskB = testCfgmAddNode(&Cfgm, "Devices/ahci/0/Config/Port5");
+    CLOAKCFGMVTABLE VTable = testCfgmMakeVTable(&Cfgm);
+    CLOAKSTORAGEDEVICEIDENTITY IdentityA = { "LAB ATA DISK", "LAB1", szSerialA };
+    CLOAKSTORAGEDEVICEIDENTITY IdentityB = { "LAB ATA DISK", "LAB1", szSerialB };
+    RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskB, &IdentityB), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pDiskA, "ModelNumber"), "LAB ATA DISK"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pDiskB, "SerialNumber"), szSerialB));
+    RTTESTI_CHECK(RTStrCmp(testCfgmGetString(pDiskA, "SerialNumber"),
+                             testCfgmGetString(pDiskB, "SerialNumber")) != 0);
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskB), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "ModelNumber", "User ATA Model"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pDiskA, "ModelNumber"), "User ATA Model"));
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "FirmwareRevision", "TOO-LONG-REV"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "FirmwareRevision", "LAB1"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "SerialNumber", ""), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, NULL), VERR_INVALID_PARAMETER);
+    testCfgmDestroy(&Cfgm);
+}
+
 static void testProfileClassNames(RTTEST hTest)
 {
     RTTestSub(hTest, "Profile class names");
@@ -1107,6 +1183,7 @@ int main()
         testChassisType(hTest);
         testProfileMaterializationFields(hTest);
         testCfgmMaterialization(hTest);
+        testStorageLabMaterialization(hTest);
         testProfileClassNames(hTest);
 
         rcExit = RTTestSummaryAndDestroy(hTest);
