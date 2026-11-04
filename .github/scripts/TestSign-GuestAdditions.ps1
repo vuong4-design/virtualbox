@@ -86,27 +86,44 @@ function Assert-TestSignature([string] $file, [string] $thumbprint) {
     Write-Host "TEST SIGNATURE OK: $(Split-Path $file -Leaf) (trust=$($sig.Status); signer=$($signer.Thumbprint))"
 }
 function Test-CatalogUntrustedRootOnly([string] $message) {
-    # SignTool wraps messages and may double spaces in its verbose output.
-    # Require positive catalog membership and the exact expected trust error;
-    # never suppress missing membership, hash mismatches, or extra errors.
+    # SignTool splits success details and error messages across stdout/stderr.
+    # PowerShell 2>&1 can interleave them in a surprising order (observed:
+    # '...terminated in a root Signing Certificate Chain: ... certificate which...').
+    # The caller now captures the streams separately. Parse the error segments
+    # defensively as well, without accepting missing member/hash or extra errors.
     $flat = [regex]::Replace($message, '\s+', ' ')
-    $hasCatalogMember = $flat -match '(?i)\bFile is signed in catalog:\s+\S+'
-    $hasMemberHash = $flat -match '(?i)\bHash of file \((sha1|sha256)\):\s*[0-9a-f]{40,64}\b'
-    $hasUntrustedRoot = $flat -match '(?i)SignTool Error:\s*A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider\.'
-    $hasFileNotValid = $flat -match '(?i)SignTool Error:\s*File not valid:'
-    $errorCount = [regex]::Matches($flat, '(?i)SignTool Error:').Count
-    return ($hasCatalogMember -and $hasMemberHash -and $hasUntrustedRoot -and $hasFileNotValid -and $errorCount -eq 2)
+    if ($flat -notmatch '(?i)\bFile is signed in catalog:\s+\S+') { return $false }
+    if ($flat -notmatch '(?i)\bHash of file \((sha1|sha256)\):\s*[0-9a-f]{40,64}\b') { return $false }
+    $errors = [regex]::Matches($flat, '(?i)SignTool Error:')
+    if ($errors.Count -ne 2) { return $false }
+    $chainError = $flat.Substring($errors[0].Index, $errors[1].Index - $errors[0].Index)
+    $fileError = $flat.Substring($errors[1].Index)
+    $trustStart = $chainError -match '(?i)^SignTool Error:\s*A certificate chain processed, but terminated in a root\b'
+    $trustEnd = $chainError -match '(?i)\bcertificate which is not trusted by the trust provider\.'
+    $fileNotValid = $fileError -match '(?i)^SignTool Error:\s*File not valid:'
+    return ($trustStart -and $trustEnd -and $fileNotValid)
 }
 function Assert-CatalogMember([string] $signTool, [string] $catalog, [string] $inf) {
-    # SignTool verifies catalog membership and hashes before chain trust.
-    $verifyOutput = @(& $signTool verify /pa /v /c $catalog $inf 2>&1 | ForEach-Object { $_.ToString() })
-    $verifyExit = $LASTEXITCODE
-    $message = $verifyOutput -join [Environment]::NewLine
-    if ($verifyExit -eq 0) { Write-Host "Catalog member verified: $inf"; return }
-    if (-not (Test-CatalogUntrustedRootOnly $message)) {
-        throw "Catalog member verification failed for $inf (exit=$verifyExit): $message"
+    # Never merge native stdout/stderr via 2>&1. Capturing separately avoids
+    # an untrusted-root sentence being split by verbose certificate-chain text.
+    $stdoutLog = [IO.Path]::GetTempFileName()
+    $stderrLog = [IO.Path]::GetTempFileName()
+    try {
+        $verifyArgs = 'verify /pa /v /c "{0}" "{1}"' -f $catalog, $inf
+        $process = Start-Process -FilePath $signTool -ArgumentList $verifyArgs `
+            -NoNewWindow -PassThru -Wait -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+        $stdout = [IO.File]::ReadAllText($stdoutLog)
+        $stderr = [IO.File]::ReadAllText($stderrLog)
+        $message = $stdout + [Environment]::NewLine + $stderr
+        if ($process.ExitCode -eq 0) { Write-Host "Catalog member verified: $inf"; return }
+        if (-not (Test-CatalogUntrustedRootOnly $message)) {
+            throw "Catalog member verification failed for $inf (exit=$($process.ExitCode)): $message"
+        }
+        Write-Host "Catalog member found and hashed; only test-root trust failed (expected on CI): $inf"
     }
-    Write-Host "Catalog member found and hashed; only test-root trust failed (expected on CI): $inf"
+    finally {
+        Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+    }
 }
 if ($VerifyOnly) {
     Require-File $manifestPath

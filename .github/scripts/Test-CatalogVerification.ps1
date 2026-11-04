@@ -44,4 +44,46 @@ foreach ($item in $negativeCases.GetEnumerator()) {
         throw "FAIL: unexpected verification error was allowed: $($item.Key)"
     }
 }
-Write-Host 'Catalog verification policy tests: PASS (1 expected trust-only, 5 rejected invalid cases)'
+$interleavedVBoxMouseLog = @'
+Verifying: D:\a\_temp\vbox-guest-test-signing\VBoxMouse\VBoxMouse.inf
+File is signed in catalog:
+D:\a\_temp\vbox-guest-test-signing\VBoxMouse\vboxmouse.cat
+Hash of file (sha1):
+7416BEF318980A74BDBCDAC7E4EE94B2C0DFBB90
+SignTool Error: A certificate chain processed, but terminated in a
+root Signing Certificate Chain: Issued to: VirtualBox Guest Additions CI TEST ONLY certificate which is not
+trusted by the trust provider. SignTool Error: File not valid:
+D:\a\_temp\vbox-guest-test-signing\VBoxMouse\VBoxMouse.inf
+Issued by: VirtualBox Guest Additions CI TEST ONLY
+Expires: Fri Dec 04 08:17:57 2026
+SHA1 hash: 7882EC9F5B341FF608C03B67F2E19F843F10E047
+File is not timestamped.
+Number of files successfully Verified: 0 Number of warnings: 0 Number of errors: 1
+'@
+if (-not (Test-CatalogUntrustedRootOnly $interleavedVBoxMouseLog)) {
+    throw 'FAIL: actual VBoxMouse log with interleaved stdout/stderr was rejected'
+}
+
+$joinedSeparateStreams = @'
+Verifying: D:\a\_temp\VBoxMouse\VBoxMouse.inf
+File is signed in catalog: D:\a\_temp\VBoxMouse\vboxmouse.cat
+Hash of file (sha1): 7416BEF318980A74BDBCDAC7E4EE94B2C0DFBB90
+Signing Certificate Chain: Issued to: VirtualBox Guest Additions CI TEST ONLY
+SignTool Error: A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+SignTool Error: File not valid: D:\a\_temp\VBoxMouse\VBoxMouse.inf
+'@
+if (-not (Test-CatalogUntrustedRootOnly $joinedSeparateStreams)) {
+    throw 'FAIL: separated streams trust-only failure was rejected'
+}
+
+$extraNegativeCases = @{
+    'Interleaved extra error' = $interleavedVBoxMouseLog + "`nSignTool Error: File hash mismatch"
+    'Interleaved no member' = $interleavedVBoxMouseLog.Replace('File is signed in catalog:', 'File is NOT signed in catalog:')
+    'Interleaved untrusted text removed' = $interleavedVBoxMouseLog.Replace('certificate which is not', 'certificate which is')
+}
+foreach ($item in $extraNegativeCases.GetEnumerator()) {
+    if (Test-CatalogUntrustedRootOnly $item.Value) {
+        throw "FAIL: interleaved erroneous output allowed: $($item.Key)"
+    }
+}
+Write-Host 'Catalog verification policy tests: PASS (3 accepted trust-only, 8 rejected invalid cases)'
