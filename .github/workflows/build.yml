@@ -292,6 +292,14 @@ jobs:
           Write-Host "=== AutoConfig.kmk Content ===";
           if (Test-Path "AutoConfig.kmk") { Get-Content "AutoConfig.kmk"; }
 
+      - name: Validate lab ACPI header checksum reference
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & python '.github/scripts/test-cloak-acpi-reference.py'
+          if ($LASTEXITCODE -ne 0) { throw "Lab ACPI header reference tests failed: exit=$LASTEXITCODE" }
+
       - name: Build VirtualBox
         shell: pwsh
         working-directory: ${{ github.workspace }}
@@ -320,11 +328,18 @@ jobs:
           $dll = 'out\win.amd64\release\bin\VBoxC.dll'
           if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw "Missing $dll" }
           $imageText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll).Path))
-          foreach ($value in @('lab-dmi-v1', 'LabVendor', 'LabDesktop-01', 'LAB DMI/ACPI profile selected')) {
+          foreach ($value in @('lab-dmi-v1', 'LabVendor', 'LabDesktop-01', 'LAB0', 'LAB DMI/ACPI profile selected')) {
             if (-not $imageText.Contains($value)) { throw "Development identity marker not compiled into VBoxC.dll: $value" }
           }
           if ($imageText.Contains('CloakBuildIdentity.h is only valid')) { Write-Warning 'Unexpected build identity macro string discovered' }
           Write-Host 'PASS: lab-only DMI/ACPI identity is embedded in host runtime'
+          $deviceDll = 'out\win.amd64\release\bin\VBoxDD.dll'
+          if (-not (Test-Path -LiteralPath $deviceDll -PathType Leaf)) { throw "Missing $deviceDll" }
+          $deviceText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $deviceDll).Path))
+          foreach ($value in @('CloakLabPatchHeaders', 'ACPI lab: AML table length mismatch', 'ACPI: lab profile updated')) {
+            if (-not $deviceText.Contains($value)) { throw "Lab ACPI header support not linked into VBoxDD.dll: $value" }
+          }
+          Write-Host 'PASS: lab DSDT/SSDT header patch is embedded in VBoxDD.dll'
 
       - name: Build and run cloak config testcase
         shell: pwsh

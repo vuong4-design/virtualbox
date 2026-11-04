@@ -10,9 +10,15 @@ do not rebuild or test-sign Guest Additions for this experiment.
 - Windows host binary: `VBoxC.dll` built with `VBOX_WITH_CLOAK_LAB_PROFILE=1`.
 - Lab profile ID: `lab-dmi-v1`; expected guest SMBIOS system maker
   `LabVendor`, system product `LabDesktop-01`, BIOS maker `LabFirmware`.
-- It also supplies `LAB` as the ACPI OEM ID where the existing VirtualBox
-  ACPI CFGM producer supports the override. ACPI can require separate raw
-  table inspection; WMI values alone do not confirm the ACPI identity.
+- The lab profile supplies `LAB` as the ACPI OEM ID, `LAB0` as the
+  four-character table-ID prefix, and sets `CloakLabPatchHeaders=1`.
+  This opts in to patching the copied DSDT and generated CPU/TPM SSDT
+  header fields. The ACPI table length and signature are validated, and
+  the checksum is regenerated; the AML method bytecode is left intact.
+  Without the lab switch, the normal VirtualBox table bytes are unchanged.
+  Conflicting pre-existing ACPI OEM overrides cause VM startup to fail closed
+  instead of producing mixed OEM identifiers. Changing headers does NOT
+  replace hardware identifiers inside AML methods.
 - The profile is *DRAFT*, intentionally separate from the empty production
   profile registry and the `VBOX_WITH_CLOAK_BUILD` manifest checks. Only an
   explicitly compiled **lab** host can select this profile.
@@ -26,7 +32,8 @@ do not rebuild or test-sign Guest Additions for this experiment.
 The host `build` job writes `VBOX_WITH_CLOAK_LAB_PROFILE = 1` to its
 `LocalConfig.kmk`; `src/VBox/Main/Makefile.kmk` passes the preprocessor
 symbol to `VBoxC`. After building, CI checks `VBoxC.dll` for the exact lab
-profile markers. JSON tests alone do not verify that runtime code was compiled.
+profile markers and `VBoxDD.dll` for the ACPI header-patching code.
+JSON tests alone do not verify that runtime code was compiled.
 
 The **production** `VBOX_WITH_CLOAK_BUILD` path still requires an authentic,
 verified build identity manifest and compatible production profiles. This
@@ -83,6 +90,31 @@ misrepresent it as a production firmware provenance record.
    Expected: `LabVendor` / `LabDesktop-01`, BIOS `LabFirmware`,
    `VBoxGuest` reports `ConfigManagerErrorCode = 0`, and `VBoxService`
    runs. GPU and disk names may still show VirtualBox: that is expected.
+
+6. **ACPI header verification after the new host build**, using a full
+   cold boot of the same VM. Copy `Test-CloakAcpiGuest.ps1` from `.github/scripts`
+   into the Windows guest and run it in PowerShell as administrator:
+
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CloakAcpiGuest.ps1
+   ```
+
+   Expected registry identity (shown without the final revision subkey):
+
+   ```text
+   HKLM\HARDWARE\ACPI\DSDT\LAB___\LAB0DSDT
+   HKLM\HARDWARE\ACPI\SSDT\LAB___\LAB0CPUT
+   HKLM\HARDWARE\ACPI\FADT\LAB___\LAB0FACP
+   HKLM\HARDWARE\ACPI\RSDT\LAB___\LAB0XSDT
+   ```
+
+   If TPM ACPI tables are present, an additional SSDT with Table ID
+   `LAB0TPM0` may appear. The script also checks DMI, the unchanged
+   `80EE:CAFE` device, and the official Guest Additions service.
+
+   These keys show header metadata, not a proof of a full AML identity
+   rewrite. **Do not claim ACPI full-pass until Windows guest results
+   confirm it.** The build CI only verifies code presence/compilation.
 
 ## Roll back safely
 

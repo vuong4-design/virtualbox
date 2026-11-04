@@ -4369,6 +4369,7 @@ static DECLCALLBACK(int) acpiR3Construct(PPDMDEVINS pDevIns, int iInstance, PCFG
                                   "|Serial3Irq"
                                   "|AcpiOemId"
                                   "|AcpiOemTabId"
+                                  "|CloakLabPatchHeaders"
                                   "|AcpiCreatorId"
                                   "|AcpiCreatorRev"
                                   "|CustomTable"

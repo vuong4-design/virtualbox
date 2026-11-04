@@ -56,6 +56,51 @@
 
 #include "VBoxDD.h"
 
+/**
+ * Normalize the OEM fields of the DSDT and CPU SSDT for the opt-in
+ * lab DMI/ACPI test. The AML bytecode is preserved verbatim.
+ *
+ * On ordinary VMs CloakLabPatchHeaders is absent and this is a no-op.
+ * Both the signature and the encoded table length must match before
+ * modifying the header, otherwise boot is stopped with a clear error.
+ */
+static int acpiLabPatchAmlHeader(PPDMDEVINS pDevIns, uint8_t *pbAml, size_t cbAml,
+                                 const char *pszSignature, const char *pszSuffix)
+{
+    PCPDMDEVHLPR3 pHlp = pDevIns->pHlpR3;
+    bool fPatch = false;
+    int rc = pHlp->pfnCFGMQueryBoolDef(pDevIns->pCfg, "CloakLabPatchHeaders", &fPatch, false);
+    if (RT_FAILURE(rc) || !fPatch)
+        return rc;
+
+    if (   !pbAml || cbAml < sizeof(ACPITBLHDR) || cbAml > UINT32_MAX
+        || memcmp(pbAml, pszSignature, 4))
+        return PDMDEV_SET_ERROR(pDevIns, VERR_INVALID_PARAMETER, N_("ACPI lab: invalid AML header"));
+
+    PACPITBLHDR pHdr = (PACPITBLHDR)pbAml;
+    if (RT_LE2H_U32(pHdr->cbTbl) != cbAml)
+        return PDMDEV_SET_ERROR(pDevIns, VERR_PARSE_ERROR, N_("ACPI lab: AML table length mismatch"));
+
+    char szOemId[16];
+    rc = pHlp->pfnCFGMQueryStringDef(pDevIns->pCfg, "AcpiOemId", szOemId, sizeof(szOemId), "VBOX  ");
+    if (RT_FAILURE(rc) || !*szOemId || strlen(szOemId) > sizeof(pHdr->abOemId))
+        return PDMDEV_SET_ERROR(pDevIns, VERR_INVALID_PARAMETER, N_("ACPI lab: invalid OEM ID"));
+
+    char szTabPrefix[16];
+    rc = pHlp->pfnCFGMQueryStringDef(pDevIns->pCfg, "AcpiOemTabId", szTabPrefix, sizeof(szTabPrefix), "VBOX");
+    if (RT_FAILURE(rc) || strlen(szTabPrefix) != 4)
+        return PDMDEV_SET_ERROR(pDevIns, VERR_INVALID_PARAMETER, N_("ACPI lab: invalid OEM table ID"));
+
+    memset(pHdr->abOemId, ' ', sizeof(pHdr->abOemId));
+    memcpy(pHdr->abOemId, szOemId, strlen(szOemId));
+    memcpy(pHdr->abOemTblId, szTabPrefix, 4);
+    memcpy(pHdr->abOemTblId + 4, pszSuffix, 4);
+    RTAcpiTblHdrChecksumGenerate(pHdr, cbAml);
+    if (RTAcpiChecksumGenerate(pbAml, cbAml) != 0)
+        return PDMDEV_SET_ERROR(pDevIns, VERR_INVALID_STATE, N_("ACPI lab: header checksum failed"));
+    LogRel(("ACPI: lab profile updated %.4s header OEM fields and checksum\n", pszSignature));
+    return VINF_SUCCESS;
+}
 /** The CPU suffixes being used for processor object names. */
 static const char g_achCpuSuff[] = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
@@ -412,6 +457,12 @@ int acpiPrepareDsdt(PPDMDEVINS pDevIns,  void **ppvPtr, size_t *pcbDsdt)
 
     if (RT_SUCCESS(rc))
     {
+        rc = acpiLabPatchAmlHeader(pDevIns, pabAmlCodeDsdt, cbAmlCodeDsdt, "DSDT", "DSDT");
+        if (RT_FAILURE(rc))
+        {
+            RTMemFree(pabAmlCodeDsdt);
+            return rc;
+        }
         *ppvPtr = pabAmlCodeDsdt;
         *pcbDsdt = cbAmlCodeDsdt;
     }
@@ -452,6 +503,12 @@ int acpiPrepareSsdt(PPDMDEVINS pDevIns, void **ppvPtr, size_t *pcbSsdt)
 
     if (RT_SUCCESS(rc))
     {
+        rc = acpiLabPatchAmlHeader(pDevIns, pabAmlCodeSsdt, cbAmlCodeSsdt, "SSDT", "CPUT");
+        if (RT_FAILURE(rc))
+        {
+            RTMemFree(pabAmlCodeSsdt);
+            return rc;
+        }
         *ppvPtr = pabAmlCodeSsdt;
         *pcbSsdt = cbAmlCodeSsdt;
     }
@@ -487,6 +544,12 @@ int acpiPrepareTpmSsdt(PPDMDEVINS pDevIns, void **ppvPtr, size_t *pcbSsdt)
 
     if (RT_SUCCESS(rc))
     {
+        rc = acpiLabPatchAmlHeader(pDevIns, pabAmlCodeSsdt, cbAmlCodeSsdt, "SSDT", "TPM0");
+        if (RT_FAILURE(rc))
+        {
+            RTMemFree(pabAmlCodeSsdt);
+            return rc;
+        }
         *ppvPtr = pabAmlCodeSsdt;
         *pcbSsdt = cbAmlCodeSsdt;
     }

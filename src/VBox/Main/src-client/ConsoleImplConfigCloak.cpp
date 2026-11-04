@@ -107,6 +107,7 @@ static const MACHINEPROFILE *cloakGetLabProfile(void)
         Profile.pszChassisType = "Desktop";
         Profile.pszProcManufacturer = "GenuineIntel";
         Profile.pszAcpiOemId = "LAB";
+        Profile.pszAcpiOemTabId = "LAB0";
         Profile.uI440FxVendorId = 0x8086;
         Profile.uI440FxDeviceId = 0x1237;
         Profile.uPiix3IsaDeviceId = 0x7000;
@@ -469,6 +470,38 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
     {
         LogRel(("Cloak: failed to materialize profile '%s', vrc=%Rrc\n", pProfile->pszProfileId, vrc));
         return vrc;
+    }
+
+    /* Complete the lab ACPI table header experiment only when the lab profile is selected. */
+    if (fLabProfile)
+    {
+        if (!pAcpi)
+        {
+            LogRel(("Cloak: lab ACPI identity requires an ACPI device\n"));
+            return VERR_NOT_FOUND;
+        }
+        /* Reject conflicting user overrides rather than creating mixed OEM headers. */
+        char szLabOem[16];
+        char szLabTableId[16];
+        int rcOem = Cfgm.pfnQueryString(Cfgm.pvUser, pAcpi, "AcpiOemId", szLabOem, sizeof(szLabOem));
+        int rcTab = Cfgm.pfnQueryString(Cfgm.pvUser, pAcpi, "AcpiOemTabId", szLabTableId, sizeof(szLabTableId));
+        if (   RT_FAILURE(rcOem) || RT_FAILURE(rcTab)
+            || RTStrCmp(szLabOem, pProfile->pszAcpiOemId)
+            || RTStrCmp(szLabTableId, pProfile->pszAcpiOemTabId))
+        {
+            LogRel(("Cloak: lab ACPI OEM values conflict with CFGM overrides\n"));
+            return VERR_MISMATCH;
+        }
+        vrc = CloakCfgmMaterializeInteger(&Cfgm, pAcpi, "CloakLabPatchHeaders", 1);
+        if (RT_FAILURE(vrc))
+            return vrc;
+        uint64_t uLabEnabled = 0;
+        vrc = Cfgm.pfnQueryInteger(Cfgm.pvUser, pAcpi, "CloakLabPatchHeaders", &uLabEnabled);
+        if (RT_FAILURE(vrc) || uLabEnabled != 1)
+        {
+            LogRel(("Cloak: lab ACPI header switch is not enabled\n"));
+            return VERR_INVALID_PARAMETER;
+        }
     }
 
     vrc = CloakCfgmValidateEffectiveConfig(&Cfgm, pFirmware, pAcpi);
