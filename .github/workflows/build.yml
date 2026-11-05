@@ -308,6 +308,18 @@ jobs:
           & '.github/scripts/test-cloak-storage-s2.ps1'
           if (-not $?) { throw 'Storage S2 offline audit tests failed' }
 
+      - name: Validate Storage S3 capabilities and C5 consistency offline
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.github/scripts/test-cloak-storage-s3.ps1'
+          if (-not $?) { throw 'Storage S3/C5 verifier tests failed' }
+          & '.github/scripts/test-cloak-storage-s3-host.ps1'
+          if (-not $?) { throw 'Storage S3 host capability fixture failed' }
+          & '.github/scripts/test-cloak-storage-s3-collector.ps1'
+          if (-not $?) { throw 'Storage S3 guest collector tests failed' }
+
       - name: Build VirtualBox
         shell: pwsh
         working-directory: ${{ github.workspace }}

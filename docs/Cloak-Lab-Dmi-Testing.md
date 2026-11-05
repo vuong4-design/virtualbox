@@ -234,6 +234,84 @@ ExtraData overrides exist. Do not resume a saved VM across changes of storage
 identity. This S1 test is **separate** from the full S0–S4 PR-3 plan in
 `doc/cloak-plan/CLOAK-PLAN.md`.
 
+### S3 capability audit and C5 cross-surface checks (read-only)
+
+S3 adds a **collector** `.github/scripts/Test-CloakStorageS3Guest.ps1`,
+a pure C5 evaluator `.github/scripts/CloakStorageC5.psm1`, and an optional
+**host evidence exporter** `.github/scripts/Export-CloakStorageC5Host.ps1`.
+No host device code, driver, ATA IDENTIFY word, SMART state or TRIM bit is
+modified. A rebuild of VirtualBox is **not needed** merely to use these
+scripts; the corresponding CI tests run on the fork workflow after push.
+
+S3 checks WMI model/firmware/serial hash, PnP vendor/product, and Windows
+Storage BusType and MediaType. If `smartctl.exe` already exists and can reach
+the drive, S3 reads only `--info --json` and compares independent model,
+firmware, serial hash, SMART support/enabled, TRIM support and rotation. For
+**direct SCSI** results only, it also compares INQUIRY vendor/product/revision
+against the reported Windows identity. The SCSI PnP prefix
+`SCSI\\DISK` on an ATA/SATA disk is **not** direct SCSI INQUIRY evidence.
+Raw VPD page 0x83 and ATAPI optical INQUIRY remain NOT_VERIFIED unless another
+collector is later integrated.
+
+On the host, inspect the controller name, port and device before mapping:
+
+```powershell
+cd D:\virtualbox
+$vbm = 'C:\path\to\same-custom-build\VBoxManage.exe'
+& $vbm showvminfo test --machinereadable |
+    Select-String 'nonrotational|discard|SATA-|IDE-'
+```
+
+For the example **only if** the *actual* guest disk 0 is attached to a
+controller named `SATA`, port 0, device 0, export a host capability policy:
+
+```powershell
+.\.github\scripts\Export-CloakStorageC5Host.ps1 -VM test -VBoxManage $vbm -OutputPath .\cloak-c5-host.json -Controller SATA -Port 0 -Device 0 -GuestDiskIndex 0
+```
+
+With multiple disks, leave unmatched host attachments unmapped and provision
+explicit mappings in a controlled fixture; never infer a guest disk index
+from port order. The host policy JSON contains only controller, port/device,
+explicitly mapped guest index, `NonRotational` and `Discard` booleans. It
+**does not** contain VDI location, image UUID, serial or seed.
+
+Copy **both** `Test-CloakStorageS3Guest.ps1` and `CloakStorageC5.psm1`
+from `.github/scripts` next to each other inside the Windows guest; also
+copy the optional `cloak-c5-host.json` from the host. Execute:
+
+```powershell
+.\Test-CloakStorageS3Guest.ps1 -HostCapabilitiesPath .\cloak-c5-host.json -OutputPath "$env:TEMP\cloak-storage-s3.json"
+```
+
+If `smartctl.exe` is installed but not on PATH, specify the full location
+with `-SmartctlPath`. With no smartctl or unsupported guest pass-through, omit
+`-HostCapabilitiesPath` if unavailable and expect **PARTIAL**, not PASS.
+Use `-RequireRaw` to fail the command when independent raw device data
+is missing. This is observational only, not a SMART self-test or a TRIM write.
+
+The C5 evaluator reports a status per check:
+
+- `PASS`: evidence observed and consistent for the named check.
+- `FAIL`: contradiction (e.g. ATA model/firmware/serial differs from WMI,
+  SMART enabled but unsupported, host discard contradicts raw TRIM, or
+  host nonrotational contradicts raw rotation).
+- `NOT_VERIFIED`: relevant evidence unavailable or not independently linked.
+- `NOT_APPLICABLE`: backend/feature absent, or no explicit host mapping.
+
+`Overall=PARTIAL` means no observed contradiction but some required
+evidence missing. `Overall=INCOMPLETE` under `-RequireRaw` is an
+**expected failing exit** if raw evidence is not available. `FAIL` always
+exits with an error. `Get-PhysicalDisk MediaType=Unspecified` is not evidence
+of HDD or SSD; an OS-level TRIM setting is not proof of ATA word 169, and
+`HealthStatus=Healthy` does not prove SMART support. C5 never turns on
+SMART, TRIM, rotation or USB/SCSI identity spoofing.
+
+Offline CI runs `test-cloak-storage-s3.ps1` (pure C5 contradictions),
+`test-cloak-storage-s3-host.ps1` (VBoxManage host evidence/redaction), and
+`test-cloak-storage-s3-collector.ps1` (guest collector, synthetic smartctl
+JSON, host pairing, fail cases and report redaction). **CI fixture PASS is
+not actual guest hardware C5 PASS.**
+
 ## Roll back safely
 
 Shut down the guest fully, then on the host:
