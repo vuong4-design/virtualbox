@@ -523,6 +523,17 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         else if (RT_FAILURE(vrc))
             return vrc;
     }
+    /* S2 is separately opt-in: an already-attached snapshot leaf must not
+     * experience a surprise serial change merely due to a host upgrade. */
+    bool fLabRootSerialEnabled = false;
+    if (fLabProfile && fLabStorageEnabled)
+    {
+        vrc = cloakQueryBool(mpVMM, pCloak, "StorageLabRootSerialEnabled", &fLabRootSerialEnabled);
+        if (vrc == VERR_CFGM_VALUE_NOT_FOUND)
+            fLabRootSerialEnabled = false;
+        else if (RT_FAILURE(vrc))
+            return vrc;
+    }
     /* S0/S1 lab: enumerate actual attached media, not guessed guest bus IDs. */
     if (fLabProfile && pProfile->pszAtaModel)
     {
@@ -602,8 +613,33 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                 hrc = Attachments[j]->COMGETTER(Medium)(pMedium.asOutParam());
                 if (FAILED(hrc) || pMedium.isNull())
                     return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                /*
+                 * S2 opt-in: derive from the root UUID, not the snapshot leaf.
+                 * Without StorageLabRootSerialEnabled, preserve the old serial.
+                 */
+                ComPtr<IMedium> pRootMedium = pMedium;
+                unsigned cMediumParents = 0;
+                if (fLabRootSerialEnabled)
+                {
+                    for (;;)
+                    {
+                        ComPtr<IMedium> pParentMedium;
+                        hrc = pRootMedium->COMGETTER(Parent)(pParentMedium.asOutParam());
+                        if (FAILED(hrc))
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                        if (pParentMedium.isNull())
+                            break;
+                        if (++cMediumParents > 128)
+                        {
+                            LogRel(("Cloak: storage parent chain exceeds safety bound\n"));
+                            return VERR_INVALID_STATE;
+                        }
+                        pRootMedium = pParentMedium;
+                    }
+                }
+
                 Bstr bstrMediumId;
-                hrc = pMedium->COMGETTER(Id)(bstrMediumId.asOutParam());
+                hrc = pRootMedium->COMGETTER(Id)(bstrMediumId.asOutParam());
                 if (FAILED(hrc))
                     return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
                 Utf8Str strMediumId(bstrMediumId);

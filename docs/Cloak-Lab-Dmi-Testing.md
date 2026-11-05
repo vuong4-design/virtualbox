@@ -134,17 +134,25 @@ can cause Windows to re-enumerate the disk. Always take a VM snapshot/backup.
   CFGM nodes. Optical, USB, SCSI, SAS, VirtIO and NVMe are not modified.
 - Every eligible HDD receives generic `ModelNumber=LAB ATA DISK`,
   `FirmwareRevision=LAB1`, and an 18-character lab serial derived from
-  the VM seed stream and the attached **medium UUID**. This distinguishes
-  multiple disks, remains stable across ordinary cold boots and stays
-  independent of controller port. The serial is not logged.
+  the VM seed stream and (by default) the **attached medium UUID**, preserving
+  the serial derivation of earlier lab builds. An **independent opt-in S2 flag**
+  `StorageLabRootSerialEnabled` switches to the **root medium UUID** obtained
+  by traversing `IMedium::Parent`; snapshot differencing leaves then share the
+  root identity. With a base medium (no parent), the result is unchanged.
+  The serial and medium UUID are never logged.
 - User ExtraData overrides are not overwritten, but the effective
   `ModelNumber` (max 40), `FirmwareRevision` (max 8), and `SerialNumber`
   (max 20) must be valid and nonempty, otherwise VM startup fails.
-- **Limit:** a medium UUID may change due to snapshot/differencing/media
-  replacement. A production-grade logical drive ID provisioner and extended
-  saved-state guard are **not yet implemented**. C5 checks for
-  INQUIRY/SMART/TRIM/nonrotation and cross-platform S3/S4 testing are pending.
-  Do not mark Storage Identity production-complete.
+- **Limit:** root-medium traversal is enabled **only** after explicitly
+  selecting `EnableRootSerial` on a powered-off VM, and is intended to survive
+  ordinary differencing snapshots. If an existing attached medium already has
+  a parent, switching this mode may change its serial once; record a fresh
+  baseline **after enabling**. It is not yet verified on real snapshot/restore.
+  Media replacement, image merge/rebase, imported images, linked/full clones,
+  and changed root media may still alter serial identity. A production-grade
+  persisted logical drive ID and extended saved-state guard remain **pending**.
+  C5 checks for INQUIRY/SMART/TRIM/nonrotation and cross-platform S3/S4 testing
+  are pending. Do not mark Storage Identity production-complete.
 
 On the **host**, shut down VM `test` entirely (state `poweroff`). Run:
 
@@ -162,6 +170,58 @@ Cold-boot the guest. Then run `Test-CloakLabStorageGuest.ps1` as Administrator
 inside the Windows guest. You should see `LAB ATA DISK` / `LAB1` for IDE/AHCI
 HDDs, and `VBoxService`/official `VBoxGuest` should still work. Disk serials,
 raw medium UUIDs and seeds are deliberately not printed.
+
+### S2: independent read-only identity audit and snapshot regression
+
+The previous user-provided Windows guest results confirmed one HDD with model
+`LAB ATA DISK`, firmware `LAB1`, serial and PnP vendor/product, with serial
+stable across three restarts. That is **not** a snapshot test or raw ATA
+IDENTIFY/SMART/TRIM evidence.
+
+Rebuild the host after the root-medium traversal change. By default,
+`StorageLabRootSerialEnabled` is off and the previous serial algorithm remains
+active. After making a backup, fully power off VM `test` and explicitly enable
+root-medium serial mode on the **host** if you want to test snapshot behavior:
+
+```powershell
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action EnableRootSerial -VM test -VBoxManage $vbm
+```
+
+Copy
+`.github/scripts/Test-CloakStorageS2Guest.ps1` into the guest and record a
+sanitized baseline (choose a path that will survive snapshot restore):
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CloakStorageS2Guest.ps1 -Mode Record -Path "$env:TEMP\cloak-storage-s2.json"
+```
+
+Cold boot, then compare from the **same guest**:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-CloakStorageS2Guest.ps1 -Mode Compare -Path "$env:TEMP\cloak-storage-s2.json"
+```
+
+To test snapshot semantics, take a **powered-off snapshot**, start the VM on
+its differencing medium, and run the compare command. If you restore a snapshot
+created before recording the baseline, restore the baseline JSON separately
+from a safe host-side copy. The audit deliberately writes no raw serial, PnP
+instance suffix or `CloakSeed` into the JSON. It rejects changes to disk
+count/index, model, firmware, serial hash or PnP vendor/product. Matching disk
+indexes is a conservative fixture requirement; reordering drives is an
+independent test and may need a different matcher.
+
+The script also shows optional Windows storage metadata; if `smartctl.exe`
+is already installed, it performs read-only `--info --json` queries. No SMART,
+TRIM, rotational or raw ATA capability is assumed supported merely because
+WMI reports model/firmware. Unavailable ATA passthrough is recorded as
+**NOT VERIFIED**, not automatically PASS.
+
+To disable the root-medium serial experiment without turning off Storage Lab,
+fully power off VM `test` and run:
+
+```powershell
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action DisableRootSerial -VM test -VBoxManage $vbm
+```
 
 **Rollback:** power off VM `test` completely and run:
 

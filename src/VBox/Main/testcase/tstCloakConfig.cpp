@@ -1122,6 +1122,20 @@ static void testStorageLabMaterialization(RTTEST hTest)
     RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdee), pszMediumA,
                                             szSerialOtherVm, sizeof(szSerialOtherVm)), VINF_SUCCESS);
     RTTESTI_CHECK(RTStrCmp(szSerialA, szSerialOtherVm) != 0);
+
+    /*
+     * S2 synthetic snapshot lineage: if the attached leaf changes, selecting
+     * the stable parent/root UUID preserves the previously derived serial.
+     * A full VM snapshot/restore still needs the T3 runtime test.
+     */
+    char szSnapshotSerial[21], szWrongLeafSerial[21];
+    const char *pszSnapshotLeaf = "77777777-2222-3333-4444-888888888888";
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef), pszMediumA,
+                                            szSnapshotSerial, sizeof(szSnapshotSerial)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szSerialA, szSnapshotSerial));
+    RTTESTI_CHECK_RC(CloakStorageLabSerial(UINT64_C(0x0123456789abcdef), pszSnapshotLeaf,
+                                            szWrongLeafSerial, sizeof(szWrongLeafSerial)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szSerialA, szWrongLeafSerial) != 0);
     RTTESTI_CHECK(RT_FAILURE(CloakStorageLabSerial(42, "bad-uuid", szSerialA2, sizeof(szSerialA2))));
     RTTESTI_CHECK_RC(CloakStorageLabSerial(42, pszMediumA, szSerialA2, 5), VERR_INVALID_PARAMETER);
 

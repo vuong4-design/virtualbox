@@ -300,6 +300,14 @@ jobs:
           & python '.github/scripts/test-cloak-acpi-reference.py'
           if ($LASTEXITCODE -ne 0) { throw "Lab ACPI header reference tests failed: exit=$LASTEXITCODE" }
 
+      - name: Validate Storage S2 guest audit offline
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.github/scripts/test-cloak-storage-s2.ps1'
+          if (-not $?) { throw 'Storage S2 offline audit tests failed' }
+
       - name: Build VirtualBox
         shell: pwsh
         working-directory: ${{ github.workspace }}
@@ -328,7 +336,7 @@ jobs:
           $dll = 'out\win.amd64\release\bin\VBoxC.dll'
           if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw "Missing $dll" }
           $imageText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Resolve-Path $dll).Path))
-          foreach ($value in @('lab-dmi-v1', 'LabVendor', 'LabDesktop-01', 'LAB0', 'LAB ATA DISK', 'StorageLabEnabled', 'LAB DMI/ACPI profile selected')) {
+          foreach ($value in @('lab-dmi-v1', 'LabVendor', 'LabDesktop-01', 'LAB0', 'LAB ATA DISK', 'StorageLabEnabled', 'StorageLabRootSerialEnabled', 'LAB DMI/ACPI profile selected')) {
             if (-not $imageText.Contains($value)) { throw "Development identity marker not compiled into VBoxC.dll: $value" }
           }
           if ($imageText.Contains('CloakBuildIdentity.h is only valid')) { Write-Warning 'Unexpected build identity macro string discovered' }

@@ -8,7 +8,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
-    [ValidateSet('Status','Enable','Disable')]
+    [ValidateSet('Status','Enable','Disable','EnableRootSerial','DisableRootSerial')]
     [string]$Action = 'Status',
     [ValidateNotNullOrEmpty()]
     [string]$VM = 'test',
@@ -34,24 +34,39 @@ $stateLine = @($info | Where-Object { $_ -match '^VMState="([^"]+)"$' })
 if ($stateLine.Count -ne 1) { throw 'Unable to determine VM power state' }
 $state = [regex]::Match([string]$stateLine[0], '^VMState="([^"]+)"$').Groups[1].Value
 
-$key = 'VBoxInternal/Cloak/StorageLabEnabled'
+$key = if ($Action -in @('EnableRootSerial','DisableRootSerial')) {
+    'VBoxInternal/Cloak/StorageLabRootSerialEnabled'
+} else { 'VBoxInternal/Cloak/StorageLabEnabled' }
 if ($Action -ne 'Status') {
     if ($state -ne 'poweroff') { throw "Shut down VM completely before modifying Storage Identity (current: $state)" }
-    if ($Action -eq 'Enable') {
+    if ($Action -in @('Enable','EnableRootSerial')) {
         $enabled = Get-ExtraData 'VBoxInternal/Cloak/Enabled'
         $profile = Get-ExtraData 'VBoxInternal/Cloak/Profile'
         if ($enabled -notin @('integer:1','1') -or $profile -notin @('lab-dmi-v1','string:lab-dmi-v1')) {
             throw 'Storage Lab requires existing enabled lab-dmi-v1 profile; refusing to modify any other profile'
         }
     }
+    if ($Action -eq 'EnableRootSerial') {
+        $storageEnabled = Get-ExtraData 'VBoxInternal/Cloak/StorageLabEnabled'
+        if ($storageEnabled -notin @('integer:1','1')) {
+            throw 'Enable Storage Lab first; root-medium serial mode requires StorageLabEnabled=1'
+        }
+    }
     if ($PSCmdlet.ShouldProcess($VM, "$Action lab storage identity")) {
-        $value = if ($Action -eq 'Enable') { 'integer:1' } else { 'integer:0' }
+        $value = if ($Action -in @('Enable','EnableRootSerial')) { 'integer:1' } else { 'integer:0' }
         & $VBoxManage setextradata $VM $key $value
         if ($LASTEXITCODE -ne 0) { throw 'setextradata failed' }
+        if ($Action -eq 'Disable') {
+            # A future Enable must not silently reactivate a previous S2 mode.
+            & $VBoxManage setextradata $VM 'VBoxInternal/Cloak/StorageLabRootSerialEnabled' 'integer:0'
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to disable root-medium serial mode' }
+        }
     }
 }
 
 Write-Host "VM: $VM (power state: $state)"
-$current = Get-ExtraData $key
+$current = Get-ExtraData 'VBoxInternal/Cloak/StorageLabEnabled'
+$root = Get-ExtraData 'VBoxInternal/Cloak/StorageLabRootSerialEnabled'
 Write-Host ("StorageLabEnabled: " + $(if ($current) { $current } else { '<not set> (OFF)' }))
+Write-Host ("StorageLabRootSerialEnabled: " + $(if ($root) { $root } else { '<not set> (OFF)' }))
 Write-Host 'Changes take effect on cold boot only. No seeds or disk serials were printed.'
