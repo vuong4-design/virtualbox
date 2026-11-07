@@ -67,12 +67,44 @@ Assert-WinQuery ($null -eq (ConvertFrom-CloakScsiInquiry -Bytes $inq)) 'Control 
 Assert-WinQuery ($null -eq (ConvertFrom-CloakScsiInquiry -Bytes ([byte[]](0,1,2)))) 'Truncated INQUIRY rejected'
 Write-Host 'PASS: read-only SCSI INQUIRY byte parsing and invalid input rejection'
 
+$vpd = New-Object byte[] 252
+$vpd[0]=5      # optical peripheral type
+$vpd[1]=0x83   # device identification VPD page
+$vpd[2]=0
+$vpd[3]=8      # 4 bytes header + a 4-byte synthetic designator
+$vpd[4]=1      # binary code set
+$vpd[5]=3      # NAA type
+$vpd[6]=0
+$vpd[7]=4
+$vpd[8]=0xde; $vpd[9]=0xad; $vpd[10]=0xbe; $vpd[11]=0xef
+$parsedVpd=ConvertFrom-CloakScsiVpd83 -Bytes $vpd
+Assert-WinQuery ($parsedVpd.IdentifierCount -eq 1 -and $parsedVpd.DeviceType -eq 5) 'VPD 0x83 designator parsed'
+Assert-WinQuery (-not (($parsedVpd | ConvertTo-Json) -match 'deadbeef')) 'VPD designator values must not appear in report'
+$badVpd=[byte[]]$vpd.Clone()
+$badVpd[3]=250
+Assert-WinQuery ($null -eq (ConvertFrom-CloakScsiVpd83 -Bytes $badVpd)) 'VPD page exceeding buffer rejected'
+$emptyVpd=[byte[]]$vpd.Clone()
+$emptyVpd[3]=0
+$empty=ConvertFrom-CloakScsiVpd83 -Bytes $emptyVpd
+Assert-WinQuery ($null -ne $empty -and $empty.IdentifierCount -eq 0) 'Empty VPD page does not pretend to contain designators'
+Write-Host 'PASS: SCSI VPD 0x83 bounded parsing, redaction, empty and malformed pages'
+
 # On Windows only, verify that the P/Invoke assembly compiles. Never open a
 # real device. The designated non-existent index exercises CreateFile failure.
 if ($PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows) {
     $probe = Get-CloakStorageWindowsProperties -DiskIndex 1024
-    Assert-WinQuery ($null -eq $probe) 'Nonexistent disk returns no properties'
-    Assert-WinQuery ($null -ne ('CloakStorageS3ReadOnly.DeviceProps' -as [type])) 'P/Invoke assembly compiled'
+    Assert-WinQuery ($null -ne $probe -and $null -eq $probe.DeviceType) 'Nonexistent disk has no fabricated descriptor'
+    Assert-WinQuery ($probe.QueryStatus.DeviceDescriptor -ne 'AVAILABLE' -and
+        $probe.QueryStatus.Trim -ne 'AVAILABLE' -and
+        $probe.QueryStatus.SeekPenalty -ne 'AVAILABLE') 'No fabricated storage capabilities'
+    Assert-WinQuery ($probe.QueryStatus.DeviceDescriptor -in @('DEVICE_NOT_FOUND','ACCESS_DENIED','UNSUPPORTED','DRIVER_OR_STORAGE_ERROR')) 'Sanitized diagnostic without device path'
+    $diag = $probe.QueryDiagnostics.DeviceDescriptor
+    Assert-WinQuery ($null -ne $diag -and $diag.FailureStage -in @('CREATE_FILE','DEVICE_IO_CONTROL','INVALID_RESPONSE_SIZE')) 'Diagnostic exposes only controlled stages'
+    Assert-WinQuery ([int]$diag.Win32Error -gt 0) 'Diagnostic includes numeric Win32 error code'
+    Assert-WinQuery ($null -ne $probe.QueryDiagnostics.Trim -and $null -ne $probe.QueryDiagnostics.SeekPenalty) 'Each query independently diagnosed'
+    $safe = $probe | ConvertTo-Json -Depth 7
+    Assert-WinQuery (-not $safe.Contains('PhysicalDrive1024') -and -not $safe.Contains('\\.\')) 'No device path in diagnostic JSON'
+    Assert-WinQuery ($null -ne ('CloakStorageS3ReadOnlyB3.DeviceProps' -as [type])) 'P/Invoke assembly compiled'
     Write-Host 'PASS: Windows Add-Type read-only IOCTL helper compiled'
 }
-Write-Host 'PASS: Storage S3 Windows query offline tests'
+Write-Host 'PASS: Storage S3 Windows query offline tests and B2 numeric IOCTL diagnostics'

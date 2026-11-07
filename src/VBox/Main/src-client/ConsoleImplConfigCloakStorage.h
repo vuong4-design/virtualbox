@@ -116,4 +116,62 @@ DECLINLINE(int) CloakStorageValidateEffective(PCCLOAKCFGMVTABLE pCfgm, void *pSl
     return rc;
 }
 
+/**
+ * Prevent falsely reporting lab storage materialization when there is no
+ * supported attached HDD. This guard never changes device capabilities.
+ */
+DECLINLINE(int) CloakStorageValidateLabCoverage(bool fStorageLabEnabled, unsigned cEligible,
+                                                unsigned cMaterialized)
+{
+    if (!fStorageLabEnabled)
+        return VINF_SUCCESS;
+    if (!cEligible)
+        return VERR_NOT_FOUND;
+    if (cMaterialized != cEligible)
+        return VERR_MISMATCH;
+    return VINF_SUCCESS;
+}
+
+/**
+ * LAB-only effective identity gate. ExtraData may override the inserted
+ * defaults, but a partially overridden lab disk is NOT a coherent lab
+ * device. Reject such a configuration before the virtual device starts.
+ *
+ * Keep the general-purpose CloakStorageValidateEffective() permissive
+ * for non-lab callers. Never log or expose the expected serial here.
+ */
+DECLINLINE(int) CloakStorageValidateLabEffective(PCCLOAKCFGMVTABLE pCfgm, void *pSlot,
+                                                PCCLOAKSTORAGEDEVICEIDENTITY pIdentity)
+{
+    if (!pCfgm || !pCfgm->pfnQueryString || !pSlot || !pIdentity
+        || !pIdentity->pszModel || !pIdentity->pszFirmware || !pIdentity->pszSerial)
+        return VERR_INVALID_PARAMETER;
+
+    int rc = CloakStorageValidateEffective(pCfgm, pSlot);
+    if (RT_FAILURE(rc))
+        return rc;
+
+    struct
+    {
+        const char *pszKey;
+        const char *pszExpected;
+    } const aFields[] =
+    {
+        { "ModelNumber",     pIdentity->pszModel },
+        { "FirmwareRevision",pIdentity->pszFirmware },
+        { "SerialNumber",    pIdentity->pszSerial }
+    };
+    for (size_t i = 0; i < RT_ELEMENTS(aFields); ++i)
+    {
+        char szValue[64] = {};
+        rc = pCfgm->pfnQueryString(pCfgm->pvUser, pSlot, aFields[i].pszKey, szValue, sizeof(szValue));
+        if (RT_SUCCESS(rc) && RTStrCmp(szValue, aFields[i].pszExpected))
+            rc = VERR_MISMATCH;
+        RTMemWipeThoroughly(szValue, sizeof(szValue), 3);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+    return VINF_SUCCESS;
+}
+
 #endif /* MAIN_INCLUDED_ConsoleImplConfigCloakStorage_h */

@@ -1153,17 +1153,35 @@ static void testStorageLabMaterialization(RTTEST hTest)
                              testCfgmGetString(pDiskB, "SerialNumber")) != 0);
     RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VINF_SUCCESS);
     RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskB), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskB, &IdentityB), VINF_SUCCESS);
 
     RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "ModelNumber", "User ATA Model"), VINF_SUCCESS);
     RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
     RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pDiskA, "ModelNumber"), "User ATA Model"));
     RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "ModelNumber", "LAB ATA DISK"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
     RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "FirmwareRevision", "TOO-LONG-REV"), VINF_SUCCESS);
     RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "FirmwareRevision", "LAB2"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VERR_MISMATCH);
     RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "FirmwareRevision", "LAB1"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "SerialNumber", "LB00000000000000"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "SerialNumber", szSerialA), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, &IdentityA), VINF_SUCCESS);
     RTTESTI_CHECK_RC(testCfgmSetString(pDiskA, "SerialNumber", ""), VINF_SUCCESS);
     RTTESTI_CHECK_RC(CloakStorageValidateEffective(&VTable, pDiskA), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(false, 0, 0), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(true, 0, 0), VERR_NOT_FOUND);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(true, 2, 2), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(true, 2, 1), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(true, 1, 2), VERR_MISMATCH);
     RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, NULL), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, NULL), VERR_INVALID_PARAMETER);
     testCfgmDestroy(&Cfgm);
 }
 

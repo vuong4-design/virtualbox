@@ -250,9 +250,10 @@ firmware, serial hash, SMART support/enabled, TRIM support and rotation. For
 **direct SCSI** results only, it also compares INQUIRY vendor/product/revision
 against the reported Windows identity. The SCSI PnP prefix
 `SCSI\\DISK` on an ATA/SATA disk is **not** direct SCSI INQUIRY evidence.
-Raw SCSI VPD page 0x83 remains NOT_VERIFIED. ATAPI optical INQUIRY is
-attempted by the opt-in read-only Windows pass-through described in S3.1;
-if the guest driver blocks the query, it also remains NOT_VERIFIED.
+Raw SCSI VPD page 0x83 is now attempted only on appropriate direct SCSI
+and optical devices (S3.2); missing or empty pages remain NOT_VERIFIED.
+ATAPI optical INQUIRY is attempted through fixed read-only pass-through;
+if the guest driver blocks either request it remains NOT_VERIFIED.
 
 On the host, inspect the controller name, port and device before mapping:
 
@@ -353,6 +354,387 @@ CI runs `test-cloak-storage-s3-winquery.ps1` and
 `test-cloak-storage-s3-ata.ps1` with synthetic bytes and no real devices.
 Native query success and optical pass-through require separate VM runtime
 evidence; do not label S3 fully PASS from the offline fixtures.
+
+#### S3.2 Versioned guest audit release (one copy, no VirtualBox rebuild)
+
+Release `S3-C5-2026-11-B1` bundles the **three** guest files with a SHA-256
+manifest. It is designed to prevent the observed mismatch where `RawInquiry`
+contained a valid optical INQUIRY but the old C5 module still reported
+`ATAPI_OPTICAL=NOT_VERIFIED` with the obsolete note `not collected`.
+
+On the Windows host:
+
+```powershell
+cd D:\virtualbox
+.\.github\scripts\New-CloakStorageS3Bundle.ps1 `
+    -OutputPath "$env:TEMP\CloakStorageS3-B1.zip" -Force
+```
+
+Copy that ZIP (not individual scripts) into the guest. In PowerShell:
+
+```powershell
+cd C:\Users\admin\Documents\scripts
+Expand-Archive .\CloakStorageS3-B1.zip -DestinationPath .\S3-C5-B1 -Force
+Copy-Item .\cloak-c5-host.json .\S3-C5-B1\cloak-c5-host.json
+cd .\S3-C5-B1
+.\Test-CloakStorageS3Guest.ps1 `
+    -NativeAtaIdentify `
+    -HostCapabilitiesPath .\cloak-c5-host.json `
+    -OutputPath "$env:TEMP\cloak-storage-s3-B1.json"
+```
+
+The collector checks all three SHA-256 entries **before module import**.
+If no manifest exists (manual copying), the collector still refuses older
+or mixed module release contracts, but does not claim SHA-256 verification.
+JSON now includes `AuditRevision`, `BundleIntegrity`, and SHA-256 source
+hashes. Hashes detect accidental corruption/mixing, **not** malicious
+tampering or authorship (the manifest is not signed). No VMware/VirtualBox
+binary, guest driver, Oracle Guest Additions or storage capability is modified.
+
+**Updated Windows property diagnostics:** WindowsQuery is now a sanitized
+object even when IOCTL_STORAGE_QUERY_PROPERTY fails; its `QueryStatus`
+contains a reason such as `UNSUPPORTED`, `ACCESS_DENIED`, `DEVICE_NOT_FOUND`,
+or `DRIVER_OR_STORAGE_ERROR`. The collector retries with a read-only handle
+if metadata-only access fails. OS descriptors are not raw ATA evidence.
+
+**Extended optical/SCSI checks:** fixed read-only SCSI `INQUIRY 0x12` EVPD
+page `0x83` is attempted for applicable optical devices and direct SCSI
+disks. Only a designator count and peripheral type are recorded, not
+device ID bytes. An empty/unavailable VPD 0x83 is NOT_VERIFIED. On a SATA
+ATA disk, `SCSI\DISK` in PnP remains **not** proof of direct SCSI protocol.
+
+**Observed lab evidence (from Windows guest JSON):** ATA IDENTIFY 0xEC
+matched `LAB ATA DISK`, firmware `LAB1`, and serial SHA-256. SMART was
+reported unsupported/disabled, TRIM unsupported, rotation unreported;
+WindowsQuery was null. Optical direct INQUIRY returned `VBOX / CD-ROM / 1.0`,
+matching optical PnP. This is an **identity coherence result**, not proof
+of SMART functionality, SSD/HDD rotation, or every SCSI VPD page. The
+new B1 code and VPD query have not yet been run on that real guest.
+
+Offline test: `.github/scripts/test-cloak-storage-s3-bundle.ps1` creates,
+expands, audits, intentionally tampers, and tests release mismatch on a
+synthetic guest. CI runs it with the other S3/C5 fixtures before build.
+
+#### S3.3 B2 Windows IOCTL diagnostics, rotation policy, optical scope, lifecycle
+
+Release `S3-C5-2026-11-B2` supersedes the B1 guest ZIP. All changes here
+are **Windows guest audit scripts only**, not VirtualBox binaries or
+Oracle Guest Additions. A host build is NOT required to evaluate B2.
+
+**WindowsQuery repair and diagnostics:** B1 sent just 8 bytes for
+`STORAGE_PROPERTY_QUERY`; B2 sends 12 bytes including
+`AdditionalParameters[1]` and padding. B2 keeps the metadata-only and
+GENERIC_READ fallback handles, both read-only. Each of the three queries
+has a sanitized `QueryDiagnostics` entry: `Win32Error`, `FailureStage`,
+`HandleMode`, `MetadataWin32Error`, `MetadataStage`,
+`ReadOnlyWin32Error`, `ReadOnlyStage`, `ReturnedBytes`. Driver errors
+are now separated from invalid/truncated replies; paths/serials remain
+excluded from these diagnostics. A failing query is NOT_VERIFIED and
+does not silently become a PASS. See Microsoft `STORAGE_PROPERTY_QUERY`
+and `IOCTL_STORAGE_QUERY_PROPERTY` documentation.
+
+**Rotation/optical:** `ATA_WORD217` reports PASS only when ATA IDENTIFY
+word 217 contains a recognized value (1 = nonrotating; 100..65534 RPM).
+Values 0 and 65535 are **unreported**, not HDD or SSD proof. The host
+`NonRotational=false` field alone cannot fill the missing guest evidence.
+`OPTICAL_LAB_SCOPE` explicitly reports `NOT_APPLICABLE` for the current
+lab-only ATA disk profile; `VBOX/CD-ROM/1.0` can have a coherent optical
+INQUIRY PASS while remaining an expected, unprofiled optical identity.
+Do not rebrand it without a separate tested optical profile and backend.
+
+**S3 cold-boot/snapshot lifecycle compare:** `-CompareTo` reads an older
+sanitized Storage-S3-C5 JSON baseline, compares stable HDD/optical identity,
+ATA supported/capability fields and host flags, and emits
+`LifecycleComparison` separately from C5 `Overall`. An observed drift
+fails the command; missing raw evidence yields PARTIAL (not a false PASS).
+Windows transient query status and HealthStatus are intentionally not
+treated as stable drive identity. The script does not take snapshots.
+
+Build the B2 ZIP on the host, then copy the ZIP (and existing host
+`cloak-c5-host.json`) to Windows guest; do not mix B1 modules:
+
+```powershell
+cd D:\virtualbox
+.\.github\scripts\New-CloakStorageS3Bundle.ps1 `
+    -OutputPath "$env:USERPROFILE\Downloads\CloakStorageS3-B2.zip" -Force
+```
+
+Guest PowerShell Administrator, initial baseline before the snapshot:
+
+```powershell
+cd C:\Users\admin\Documents\scripts
+Expand-Archive .\CloakStorageS3-B2.zip -DestinationPath .\S3-C5-B2 -Force
+Copy-Item .\cloak-c5-host.json .\S3-C5-B2\cloak-c5-host.json
+cd .\S3-C5-B2
+.\Test-CloakStorageS3Guest.ps1 `
+    -NativeAtaIdentify `
+    -HostCapabilitiesPath .\cloak-c5-host.json `
+    -OutputPath "$env:TEMP\cloak-S3-B2-baseline.json"
+```
+
+Copy the baseline JSON to a safe location **outside the VM** before a
+snapshot/restore that could roll back the guest filesystem. After a real
+powered-off snapshot/cold boot/restore, make the baseline available in
+guest again and compare:
+
+```powershell
+.\Test-CloakStorageS3Guest.ps1 `
+    -NativeAtaIdentify `
+    -HostCapabilitiesPath .\cloak-c5-host.json `
+    -CompareTo "$env:TEMP\cloak-S3-B2-baseline.json" `
+    -OutputPath "$env:TEMP\cloak-S3-B2-after.json"
+```
+
+The ZIP has a SHA-256 manifest checked prior to module import. It detects
+accidental file corruption/mixing but is **not digitally signed**.
+Do not overwrite a baseline with its comparison output.
+
+CI now includes `test-cloak-storage-s3-lifecycle.ps1` and the existing
+bundle regression which tests CompareTo using synthetic changes. B2
+has **not** yet been run on the user's real Windows guest; host build
+and actual snapshot/restore remain separately unverified.
+
+#### S3.4 — B3 ATA descriptor consistency and cold-boot acceptance
+
+Release S3-C5-2026-11-B3 packages the same three guest scripts in a
+SHA-256 verified ZIP. The changes are audit-only; no VirtualBox host
+binary or Oracle Guest Additions change is needed.
+
+Why B3: on VM test, the ATA Windows storage descriptor reported
+Vendor empty, Product LAB ATA DISK, Revision LAB1, while PnP reported
+VEN_LAB_ATA&PROD_DISK. These are different identity representations.
+For ATA, OS_PNP_IDENTITY is explicitly NOT_APPLICABLE rather than a
+false failure. The new OS_ATA_IDENTITY compares the complete descriptor
+model and revision against WMI and independent ATA IDENTIFY, and FAILs
+on any actual disagreement. PROFILE_LAB still verifies PnP separately.
+
+SeekPenalty Win32 31 is ERROR_GEN_FAILURE, not conclusive proof of
+unsupported property or rotating media. OS_SEEK remains NOT_VERIFIED
+with that exact error; raw ATA word 217 = 0 is also unreported.
+Do not change rotation, SMART, TRIM or host NonRotational flags merely
+to satisfy the audit.
+
+Host: bundle the B3 guest files once.
+
+~~~powershell
+cd D:\virtualbox
+.\.github\scripts\New-CloakStorageS3Bundle.ps1 -OutputPath "$env:USERPROFILE\Downloads\CloakStorageS3-B3.zip" -Force
+~~~
+
+Copy ZIP to C:\Users\admin\Documents\scripts inside VM, alongside
+cloak-c5-host.json. In Administrator PowerShell, prepare B3 and take a
+baseline while the VM is still running:
+
+~~~powershell
+cd C:\Users\admin\Documents\scripts
+Expand-Archive .\CloakStorageS3-B3.zip -DestinationPath .\S3-C5-B3 -Force
+Copy-Item .\cloak-c5-host.json .\S3-C5-B3\cloak-c5-host.json
+cd .\S3-C5-B3
+.\Test-CloakStorageS3Guest.ps1 -NativeAtaIdentify -HostCapabilitiesPath .\cloak-c5-host.json -OutputPath "$env:USERPROFILE\Documents\cloak-S3-B3-baseline.json"
+~~~
+
+Keep this baseline unchanged. Before any snapshot/restore, copy the
+baseline outside the VM: a restore may also roll back guest files.
+
+For a true cold boot, SAVE your documents and run the following in
+the guest. This is a full shutdown, not Restart-Computer or VM Reset.
+
+~~~powershell
+shutdown.exe /s /t 0
+~~~
+
+Host PowerShell: ensure VM state is poweroff BEFORE restarting. Point
+$vbm to the VBoxManage.exe from the actual custom installation.
+
+~~~powershell
+$vbm = 'C:\path\to\your\current\VBoxManage.exe'
+& $vbm showvminfo "test" --machinereadable | Select-String '^VMState='
+# Require: VMState="poweroff"
+& $vbm startvm "test" --type gui
+~~~
+
+After Windows boots and disk enumeration settles, in guest
+Administrator PowerShell:
+
+~~~powershell
+cd C:\Users\admin\Documents\scripts\S3-C5-B3
+.\Test-CloakStorageS3Guest.ps1 -NativeAtaIdentify -HostCapabilitiesPath .\cloak-c5-host.json -CompareTo "$env:USERPROFILE\Documents\cloak-S3-B3-baseline.json" -OutputPath "$env:USERPROFILE\Documents\cloak-S3-B3-after-coldboot.json"
+
+$report = Get-Content "$env:USERPROFILE\Documents\cloak-S3-B3-after-coldboot.json" -Raw | ConvertFrom-Json
+$report | Select-Object AuditRevision,BundleIntegrity,Overall
+$report.LifecycleComparison | Select-Object Overall,Failed,NotVerified
+$report.LifecycleComparison.Checks | Where-Object Status -ne 'PASS' | Format-Table Disk,Id,Status,Note -AutoSize
+~~~
+
+LifecycleComparison.Overall=PASS and Failed=0 means all compared
+fields available across both runs remained unchanged. PARTIAL means
+missing evidence on at least one side; FAIL means drift and is a
+failing exit. The independent C5 Overall may still be PARTIAL because
+rotation, SeekPenalty or VPD 0x83 remains unverified. A previously
+recorded B2 baseline may be compared with B3 if its fields are
+compatible; matched B3-before/B3-after is preferable.
+
+CI tests simulate empty vendor, actual model/firmware disagreements,
+SeekPenalty error 31, and B2-to-B3 lifecycle comparisons. Only a real
+guest cold boot can confirm runtime stability.
+
+### S3.5 — Powered-off snapshot/restore end-to-end acceptance (host guarded workflow)
+
+This workflow uses existing S3-C5-2026-11-B3 guest scripts; no VirtualBox
+rebuild or guest script update is required. Host helper
+Invoke-CloakStorageS3SnapshotHost.ps1 has separate Check, Take, Ready,
+Restore and CheckRestored actions. It NEVER shuts down or starts a VM.
+Restore is an explicit, double-acknowledged action with an independently
+verified pre-restore guest report. CI tests use mock VBoxManage only.
+
+IMPORTANT: RESTORE REVERTS VM SETTINGS AND GUEST DISK FILES to the
+snapshot time. Back up all changed guest files to the HOST first.
+The baseline and before/after reports MUST live on HOST storage, not
+on the VM disk that will be rolled back. Take the snapshot only with
+VMState=poweroff; no live or saved-RAM snapshot.
+
+A. Transfer the existing guest B3 baseline (from
+C:\Users\admin\Documents\cloak-S3-B3-baseline.json) to a host directory
+as baseline.json, using a shared folder or another file transfer method.
+Guest Documents and HOST Documents are DIFFERENT paths.
+
+B. Host PowerShell; substitute the exact VBoxManage.exe path from the
+custom VirtualBox installation, never the old vbox2 or a PATH alias:
+
+~~~powershell
+cd D:\virtualbox
+$vbm = "C:\path\to\your\current\VBoxManage.exe"
+Test-Path -LiteralPath $vbm   # Must be True
+$ev = Join-Path $env:USERPROFILE 'Documents\CloakS3-Snapshot-test'
+New-Item -ItemType Directory -Path $ev -Force | Out-Null
+# Put a host copy of the B3 guest baseline at $ev\baseline.json
+$common = @{
+    VM='test'
+    VBoxManage=$vbm
+    BaselinePath=(Join-Path $ev 'baseline.json')
+    EvidenceDir=$ev
+    SnapshotName='S3-C5-identity-restore'
+}
+& .\.github\scripts\Invoke-CloakStorageS3SnapshotHost.ps1 @common -Action Check
+~~~
+
+C. Guest: save all work and run shutdown.exe /s /t 0. Wait until
+the VM is completely POWERED OFF. Then on HOST:
+
+~~~powershell
+& .\.github\scripts\Invoke-CloakStorageS3SnapshotHost.ps1 @common -Action Take
+& $vbm startvm "test" --type gui
+~~~
+
+D. Guest after the powered-off snapshot, PowerShell Administrator:
+
+~~~powershell
+cd C:\Users\admin\Documents\scripts\S3-C5-B3
+.\Test-CloakStorageS3Guest.ps1 -NativeAtaIdentify -HostCapabilitiesPath .\cloak-c5-host.json -CompareTo "$env:USERPROFILE\Documents\cloak-S3-B3-baseline.json" -OutputPath "$env:USERPROFILE\Documents\cloak-S3-B3-before-restore.json"
+~~~
+
+Require LifecycleComparison=PASS, Failed=0 and NotVerified=0. Transfer
+this guest report to HOST $ev\before.json. Back up every changed guest
+file you need to retain. Restoring will discard writes made after Take.
+
+E. Guest: shutdown.exe /s /t 0 again. On HOST after VM poweroff:
+
+~~~powershell
+$common.BeforeRestorePath = Join-Path $ev 'before.json'
+& .\.github\scripts\Invoke-CloakStorageS3SnapshotHost.ps1 @common -Action Ready
+# DESTRUCTIVE: run only after you have saved all changes outside guest.
+& .\.github\scripts\Invoke-CloakStorageS3SnapshotHost.ps1 @common -Action Restore -AllowRollback -ConfirmSnapshotName 'S3-C5-identity-restore'
+& .\.github\scripts\Invoke-CloakStorageS3SnapshotHost.ps1 @common -Action CheckRestored
+~~~
+
+The helper refuses restore unless VMState=poweroff, the uniquely named
+snapshot exists, baseline SHA256 is unchanged, before.json is a valid
+fully verified B3 lifecycle PASS and passes independent host comparison,
+and exact restoration confirmation is supplied. A host evidence file
+tracks TAKEN/READY/RESTORED without guest file paths, serials or UUIDs.
+
+F. Refresh the restored host storage binding BEFORE starting the VM.
+Use this example ONLY if SATA port0/device0 still corresponds to guest
+Disk0. Do not guess a changed mapping:
+
+~~~powershell
+& .\.github\scripts\Export-CloakStorageC5Host.ps1 -VM test -VBoxManage $vbm -Controller SATA -Port 0 -Device 0 -GuestDiskIndex 0 -OutputPath (Join-Path $ev 'cloak-c5-host-restored.json')
+& $vbm startvm "test" --type gui
+~~~
+
+Copy the refreshed HOST manifest to the guest B3 folder as
+cloak-c5-host.json. Guest B3 scripts and baseline should still exist
+because they were installed BEFORE the powered-off snapshot. Otherwise
+restore exact HOST copies, not a new baseline.
+
+G. Guest after Windows boots, PowerShell Administrator:
+
+~~~powershell
+cd C:\Users\admin\Documents\scripts\S3-C5-B3
+.\Test-CloakStorageS3Guest.ps1 -NativeAtaIdentify -HostCapabilitiesPath .\cloak-c5-host.json -CompareTo "$env:USERPROFILE\Documents\cloak-S3-B3-baseline.json" -OutputPath "$env:USERPROFILE\Documents\cloak-S3-B3-after-restore.json"
+$post = Get-Content "$env:USERPROFILE\Documents\cloak-S3-B3-after-restore.json" -Raw | ConvertFrom-Json
+$post.LifecycleComparison | Format-List Overall,Failed,NotVerified
+~~~
+
+Transfer this guest report to HOST $ev\after.json. On HOST:
+
+~~~powershell
+& .\.github\scripts\Test-CloakStorageS3SnapshotEvidence.ps1 -BaselinePath $common.BaselinePath -BeforeRestorePath $common.BeforeRestorePath -AfterRestorePath (Join-Path $ev 'after.json')
+~~~
+
+PASS means BASELINE, BEFORE and AFTER are independently compared on
+HOST without observed identity/capability drift or lifecycle gaps.
+The separate C5 Overall may remain PARTIAL because SeekPenalty Win32 31,
+ATA word 217=0, and optical VPD83 are unverified; this does NOT negate a
+LifecycleComparison PASS. An actual VM snapshot/restore is NOT claimed
+until you have run these stages against VM test and retained evidence.
+Do not delete the snapshot until you have reviewed the restored state
+and any guest files that must be retained.
+
+#### S3.6 — Lab storage hook wiring guard (snapshot runtime deferred)
+
+Hook batch H1 (2026-11-07) is a C++ source change staged for a single
+future host build. It does not update guest scripts and does not
+rebrand any optical/VSCSI/USB vendor or product.
+
+- ConsoleImplConfigCloakStorage.h adds CloakStorageValidateLabEffective:
+  checks effective CFGM ModelNumber, FirmwareRevision and SerialNumber
+  against the attachment's lab defaults after validating lengths.
+  A conflicting ExtraData override is rejected with VERR_MISMATCH.
+  Serial contents are never logged.
+- CloakStorageValidateLabCoverage rejects an explicitly enabled lab HDD
+  profile if no eligible IDE/AHCI HDD is attached, or if the materialized
+  disk count differs from the eligible count. Disabled lab mode is unchanged.
+- ConsoleImplConfigCloak.cpp calls this lab-only validation after CFGM
+  materialization and BEFORE wiping the expected serial. It only applies
+  when the lab storage identity is explicitly enabled.
+- The host inventory now counts optical attachments independently
+  as out of scope of the HDD lab profile, without changing optical IDs.
+- tstCloakConfig.cpp has positive and negative model/firmware/serial
+  override and missing/partial HDD coverage fixtures. These C++ tests
+  must still be compiled and run in CI.
+- Test-CloakLabHookWiring.ps1 is a fast, read-only source/order guard;
+  test-cloak-lab-hook-wiring.ps1 has negative fixtures that remove each
+  new guard to ensure the pre-build gate fails closed. This static PASS
+  is NOT a C++ compile nor a runtime guest acceptance result.
+
+Host-only source guard (no VM actions or VirtualBox build):
+
+~~~powershell
+cd D:\virtualbox
+.\.github\scripts\Test-CloakLabHookWiring.ps1 -OutputPath "$env:TEMP\cloak-lab-hook-wiring.json"
+~~~
+
+Deferred hooks: ATAPI optical materializer, VSCSI/USB MSD/HostDVD lab
+profiles, stable logical-drive ID independent of medium UUID, and
+backed SMART/TRIM/rotation capability implementation. Other firmware,
+PCI and graphics hooks require separate evidence and compatibility
+review; none is claimed complete by the HDD-only source guard.
+
+User requested that actual snapshot/restore work be postponed.
+Do not run snapshot actions for this hook batch. Existing snapshot
+scripts remain unchanged. A future host C++ build and tstCloakConfig
+run are required before claiming the new validator works in a VM.
 
 ## Roll back safely
 

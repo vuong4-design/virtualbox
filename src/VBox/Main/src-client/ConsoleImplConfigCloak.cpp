@@ -542,7 +542,7 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         if (FAILED(hrc))
             return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
 
-        unsigned cApplied = 0, cEligible = 0, cUnsupported = 0;
+        unsigned cApplied = 0, cEligible = 0, cUnsupported = 0, cOptical = 0;
         for (size_t i = 0; i < Controllers.size(); ++i)
         {
             StorageControllerType_T enmCtrl;
@@ -572,8 +572,13 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                 hrc = Attachments[j]->COMGETTER(Type)(&enmType);
                 if (FAILED(hrc))
                     return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                if (enmType == DeviceType_DVD)
+                {
+                    cOptical++; /* Inventory only; optical is out of HDD lab profile scope. */
+                    continue;
+                }
                 if (enmType != DeviceType_HardDisk)
-                    continue;  /* optical, USB and SCSI are S3 work */
+                    continue;
                 if (!fSupported)
                 {
                     cUnsupported++;
@@ -649,9 +654,10 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                     return vrc;
                 CLOAKSTORAGEDEVICEIDENTITY Identity = { pProfile->pszAtaModel, "LAB1", szSerial };
                 vrc = CloakStorageMaterialize(&Cfgm, pSlotCfg, &Identity);
-                RTMemWipeThoroughly(szSerial, sizeof(szSerial), 3);
                 if (RT_SUCCESS(vrc))
-                    vrc = CloakStorageValidateEffective(&Cfgm, pSlotCfg);
+                    vrc = CloakStorageValidateLabEffective(&Cfgm, pSlotCfg, &Identity);
+                /* Validate before wiping the expected serial. */
+                RTMemWipeThoroughly(szSerial, sizeof(szSerial), 3);
                 if (RT_FAILURE(vrc))
                 {
                     LogRel(("Cloak: invalid lab storage config at %s/%u/%s, vrc=%Rrc\n",
@@ -663,9 +669,15 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                         pszDevice, uInstance, szSlot));
             }
         }
+        vrc = CloakStorageValidateLabCoverage(fLabStorageEnabled, cEligible, cApplied);
+        if (RT_FAILURE(vrc))
+        {
+            LogRel(("Cloak: lab storage requested but no complete eligible HDD mapping exists, vrc=%Rrc\n", vrc));
+            return vrc;
+        }
         LogRel(("Cloak: lab storage inventory: %u eligible ATA/AHCI HDD(s), %u unsupported HDD(s), "
-                "%u materialized; StorageLabEnabled=%RTbool\n",
-                cEligible, cUnsupported, cApplied, fLabStorageEnabled));
+                "%u optical attachment(s) outside HDD lab scope, %u materialized; StorageLabEnabled=%RTbool\n",
+                cEligible, cUnsupported, cOptical, cApplied, fLabStorageEnabled));
     }
 
     try

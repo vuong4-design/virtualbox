@@ -12,18 +12,58 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = '',
+    [string]$CompareTo = '',
     [switch]$SkipSmartctl,
     [switch]$RequireRaw,
     [string]$SmartctlPath = '',
     [string]$HostCapabilitiesPath = '',
     [switch]$SkipWindowsIoctl,
     [switch]$SkipOpticalInquiry,
-    [switch]$NativeAtaIdentify
+    [switch]$NativeAtaIdentify,
+    [switch]$SkipVpd83
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$expectedS3Release = 'S3-C5-2026-11-B3'
+$bundleManifestPath = Join-Path $PSScriptRoot 'CloakStorageS3Manifest.json'
+$bundleVerified = $false
+$sourceFiles = @(
+    'Test-CloakStorageS3Guest.ps1',
+    'CloakStorageC5.psm1',
+    'CloakStorageWindowsQuery.psm1'
+)
+if (Test-Path -LiteralPath $bundleManifestPath -PathType Leaf) {
+    $bundle = Get-Content -LiteralPath $bundleManifestPath -Raw | ConvertFrom-Json
+    if ([int]$bundle.SchemaVersion -ne 1 -or $bundle.Release -cne $expectedS3Release) {
+        throw 'S3 bundle version mismatch. Obtain the complete current guest ZIP.'
+    }
+    foreach ($fileName in $sourceFiles) {
+        $entries = @($bundle.Files | Where-Object { $_.Name -ceq $fileName })
+        if ($entries.Count -ne 1 -or
+            [string]$entries[0].Sha256 -notmatch '^[a-fA-F0-9]{64}$') {
+            throw ('S3 bundle missing a valid SHA-256 entry: ' + $fileName)
+        }
+        $actual = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot $fileName) -Algorithm SHA256).Hash
+        if ($actual -cne ([string]$entries[0].Sha256).ToUpperInvariant()) {
+            throw ('S3 bundle file checksum mismatch: ' + $fileName)
+        }
+    }
+    $bundleVerified = $true
+}
 Import-Module (Join-Path $PSScriptRoot 'CloakStorageC5.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CloakStorageWindowsQuery.psm1') -Force
+$c5Contract = Get-Command Get-CloakStorageC5Contract -ErrorAction SilentlyContinue
+$windowsContract = Get-Command Get-CloakStorageWindowsQueryContract -ErrorAction SilentlyContinue
+if (-not $c5Contract -or -not $windowsContract) {
+    throw 'S3 module version mismatch: copy collector, C5 and WindowsQuery together from the same release.'
+}
+if ((Get-CloakStorageC5Contract).Release -cne $expectedS3Release -or
+    (Get-CloakStorageWindowsQueryContract).Release -cne $expectedS3Release) {
+    throw 'S3 module release mismatch: copy the complete current bundle into one directory.'
+}
+Write-Host ("S3 release {0}; bundle integrity={1}" -f $expectedS3Release,
+    $(if ($bundleVerified) { 'SHA256_VERIFIED' } else { 'NO_MANIFEST_VERSION_CHECK_ONLY' }))
+
 
 function Get-S3Hash([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
@@ -138,6 +178,10 @@ foreach ($disk in $wmiDisks) {
     } else { 'Unspecified' }
     $raw = if ($NativeAtaIdentify) { Get-CloakStorageAtaIdentify -DiskIndex $index } else { $null }
     if (-not $raw -and $smartTool) { $raw = Get-S3RawInfo $smartTool $index }
+    if ($raw -and -not $SkipVpd83 -and ([string]$raw.Protocol) -ieq 'SCSI') {
+        $vpd = Get-CloakStorageScsiVpd83 -DiskIndex $index
+        $raw | Add-Member -NotePropertyName Vpd83 -NotePropertyValue $vpd -Force
+    }
     $windowsProps = if (-not $SkipWindowsIoctl) { Get-CloakStorageWindowsProperties -DiskIndex $index } else { $null }
     $row = [pscustomobject][ordered]@{
         Index = $index
@@ -165,10 +209,14 @@ for ($i=0; $i -lt $optical.Count; $i++) {
     $hasDrive = $drive -match '^[A-Za-z]:$'
     $descriptor = $null
     $inquiry = $null
+    $vpd83 = $null
     if (-not $SkipWindowsIoctl -and $hasDrive) {
         $descriptor = Get-CloakStorageWindowsProperties -OpticalDrive $drive
         if (-not $SkipOpticalInquiry) {
             $inquiry = Get-CloakStorageOpticalInquiry -OpticalDrive $drive
+            if (-not $SkipVpd83 -and $inquiry) {
+                $vpd83 = Get-CloakStorageScsiVpd83 -OpticalDrive $drive
+            }
         }
     }
     $normalizedOptical += [pscustomobject][ordered]@{
@@ -176,6 +224,7 @@ for ($i=0; $i -lt $optical.Count; $i++) {
         PnpVendorProduct = Get-S3PnpPair ([string](Get-S3Field $cd 'PNPDeviceID'))
         WindowsQuery = $descriptor
         RawInquiry = $inquiry
+        RawVpd83 = $vpd83
     }
     Write-Host ("S3 Optical {0}: PnP={1}; OS descriptor={2}; direct INQUIRY={3}" -f
         $i,$normalizedOptical[-1].PnpVendorProduct,
@@ -213,6 +262,28 @@ if ($HostCapabilitiesPath) {
 }
 
 $report = Test-CloakStorageC5 -Disks $normalizedDisks -OpticalDevices $normalizedOptical -RequireRaw:$RequireRaw
+$lifecycleResult = $null
+if ($CompareTo) {
+    if (-not (Test-Path -LiteralPath $CompareTo -PathType Leaf)) {
+        throw 'S3 lifecycle baseline report not found'
+    }
+    if ($OutputPath -and
+        [IO.Path]::GetFullPath($OutputPath) -ieq [IO.Path]::GetFullPath($CompareTo)) {
+        throw 'S3 lifecycle current report must not overwrite its baseline'
+    }
+    $baselineReport = Get-Content -LiteralPath $CompareTo -Raw | ConvertFrom-Json
+    $currentEvidence = [pscustomobject]@{
+        SchemaVersion=1; Audit='Storage-S3-C5'
+        Disks=@($normalizedDisks)
+        OpticalDevices=@($normalizedOptical)
+    }
+    $lifecycleResult = Compare-CloakStorageS3Evidence -Baseline $baselineReport -Current $currentEvidence
+    Write-Host ("S3 lifecycle={0}; FAIL={1}; NOT_VERIFIED={2} (cold boot/snapshot baseline)" -f
+        $lifecycleResult.Overall, $lifecycleResult.Failed, $lifecycleResult.NotVerified)
+    foreach ($check in @($lifecycleResult.Checks | Where-Object { $_.Status -eq 'FAIL' })) {
+        Write-Host ("S3 lifecycle FAIL Disk={0} {1}: {2}" -f $check.Disk, $check.Id, $check.Note)
+    }
+}
 foreach ($check in $report.Checks) {
     Write-Host ("C5 [{0}] Disk={1} {2}: {3}" -f $check.Status,$check.Disk,$check.Id,$check.Note)
 }
@@ -225,15 +296,24 @@ if ($OutputPath) {
     $sanitized = [pscustomobject][ordered]@{
         SchemaVersion = 1
         Audit = 'Storage-S3-C5'
+        AuditRevision = $expectedS3Release
+        BundleIntegrity = $(if ($bundleVerified) { 'SHA256_VERIFIED' } else { 'VERSION_CHECK_ONLY' })
+        CollectorSha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+        C5ModuleSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CloakStorageC5.psm1') -Algorithm SHA256).Hash
+        WindowsQuerySha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CloakStorageWindowsQuery.psm1') -Algorithm SHA256).Hash
         Overall = $report.Overall
         Disks = @($normalizedDisks)
         OpticalDevices = @($normalizedOptical)
         Checks = @($report.Checks)
+        LifecycleComparison = $lifecycleResult
     }
     # Raw fields are already normalized and redacted, including serial SHA256.
     $json = $sanitized | ConvertTo-Json -Depth 8
     [IO.File]::WriteAllText([IO.Path]::GetFullPath($OutputPath),$json,[Text.Encoding]::UTF8)
     Write-Host ("S3 redacted report saved: {0}" -f $OutputPath)
+}
+if ($lifecycleResult -and $lifecycleResult.Overall -eq 'FAIL') {
+    throw 'S3 lifecycle snapshot/cold-boot identity drift detected; see check IDs above'
 }
 if ($report.Overall -eq 'FAIL') { throw 'S3 C5 contradictions detected; see check IDs above' }
 if ($report.Overall -eq 'INCOMPLETE') { throw 'S3 C5 strict audit incomplete; missing raw evidence' }

@@ -17,7 +17,7 @@ function Has-C5($Report,[string]$Id,[string]$Status) {
 $rawAta = [pscustomobject]@{
     Protocol = 'ATA';Model = 'LAB ATA DISK';Firmware = 'LAB1';SerialSha256 = 'ABC123'
     SmartAvailable = $true;SmartEnabled = $false;TrimSupported = $false
-    RotationRate = 1
+    RotationRate = 1;RotationWord217 = 1
 }
 $disk = [pscustomobject]@{
     Index = 0;Model = 'LAB ATA DISK';Firmware = 'LAB1';SerialSha256 = 'ABC123'
@@ -56,17 +56,39 @@ $osObserved | Add-Member -NotePropertyName WindowsQuery -NotePropertyValue ([psc
 })
 $osResult=Test-CloakStorageC5 -Disks @($osObserved) -RequireRaw
 Assert-C5 (Has-C5 $osResult 'OS_DEVICE_DESC' 'PASS') 'Windows direct access descriptor'
+Assert-C5 (Has-C5 $osResult 'ATA_WORD217' 'PASS') 'ATA word 217 has a declared valid nonrotating value'
+Assert-C5 (Has-C5 $osResult 'OS_PNP_IDENTITY' 'NOT_APPLICABLE') 'ATA PnP names are not literal descriptor fields'
+Assert-C5 (Has-C5 $osResult 'OS_ATA_IDENTITY' 'PASS') 'ATA OS descriptor model/firmware align with ATA raw and WMI'
 Assert-C5 (Has-C5 $osResult 'OS_TRIM' 'PASS') 'Windows trim property observed'
 Assert-C5 (Has-C5 $osResult 'OS_SEEK' 'PASS') 'Windows seek penalty observed'
 Assert-C5 (Has-C5 $osResult 'OS_RAW_TRIM' 'PASS') 'Windows/raw TRIM agree'
 Assert-C5 (Has-C5 $osResult 'OS_RAW_ROTATION' 'PASS') 'Windows/raw rotation agree'
+$osBadVendor = Copy-C5 $osObserved
+$osBadVendor.WindowsQuery.Vendor = 'OTHER'
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($osBadVendor)) 'OS_ATA_IDENTITY' 'FAIL') 'ATA descriptor model mismatch'
+$osBlankVendor = Copy-C5 $osObserved
+$osBlankVendor.WindowsQuery.Vendor = ''
+$osBlankVendor.WindowsQuery.Product = 'LAB ATA DISK'
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($osBlankVendor)) 'OS_ATA_IDENTITY' 'PASS') 'empty Vendor with full ATA product model is valid'
+$osBadFirmware = Copy-C5 $osBlankVendor
+$osBadFirmware.WindowsQuery.Revision = 'WRONG'
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($osBadFirmware)) 'OS_ATA_IDENTITY' 'FAIL') 'ATA descriptor firmware mismatch'
 $osBadTrim = Copy-C5 $osObserved
 $osBadTrim.WindowsQuery.TrimEnabled=$true
 Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($osBadTrim)) 'OS_RAW_TRIM' 'FAIL') 'OS TRIM contradicts raw'
 $osBadSeek = Copy-C5 $osObserved
 $osBadSeek.WindowsQuery.IncursSeekPenalty=$true
 Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($osBadSeek)) 'OS_RAW_ROTATION' 'FAIL') 'OS seek contradicts raw'
-Write-Host 'PASS: Windows descriptor/Trim/Seek vs raw ATA positive and negative C5'
+Write-Host 'PASS: ATA descriptor identity with blank Vendor, firmware mismatch, TRIM/Seek consistency'
+
+$unreported = Copy-C5 $disk
+$unreported.Raw.RotationWord217 = 0
+$unreported.Raw.RotationRate = $null
+$unreported.WindowsMediaType = 'Unspecified'
+$rotationReport = Test-CloakStorageC5 -Disks @($unreported)
+Assert-C5 (Has-C5 $rotationReport 'ATA_WORD217' 'NOT_VERIFIED') 'ATA word 217 zero must remain unverified'
+Assert-C5 (Has-C5 $rotationReport 'ROTATION' 'NOT_VERIFIED') 'No fabricated RPM from ATA word zero'
+Write-Host 'PASS: word 217=0 and unknown MediaType do not imply HDD/SSD'
 
 $missing = Copy-C5 $disk
 $missing.Raw = $null
@@ -126,10 +148,12 @@ $opticalFixture = [pscustomobject]@{
         DeviceType=5;Vendor='VBOX';Product='CD-ROM';Revision='1.0'
         Source='SCSI_PASS_THROUGH_INQUIRY_0x12'
     }
+    RawVpd83=[pscustomobject]@{Source='SCSI_PASS_THROUGH_INQUIRY_EVPD83';DeviceType=5;IdentifierCount=1;HasDesignators=$true}
 }
 $opticalOkay = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($opticalFixture)
 Assert-C5 (Has-C5 $opticalOkay 'OPTICAL_OS_DESCRIPTOR' 'PASS') 'optical Windows descriptor matches PnP'
 Assert-C5 (Has-C5 $opticalOkay 'ATAPI_OPTICAL' 'PASS') 'optical raw INQUIRY matches descriptor'
+Assert-C5 (Has-C5 $opticalOkay 'OPTICAL_VPD83' 'PASS') 'optical VPD 0x83 parsed with designator count'
 Assert-C5 ($opticalOkay.Overall -eq 'PASS') 'full observed optical fixture'
 $opticalWrong = Copy-C5 $opticalFixture
 $opticalWrong.RawInquiry.Product = 'OTHER DVD'
@@ -141,8 +165,10 @@ $opticalBadType = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($optical
 Assert-C5 (Has-C5 $opticalBadType 'OPTICAL_OS_DESCRIPTOR' 'FAIL') 'optical OS descriptor type rejected'
 $opticalMissing = Copy-C5 $opticalFixture
 $opticalMissing.RawInquiry = $null
+$opticalMissing.RawVpd83 = $null
 $opticalNotVerified = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($opticalMissing)
 Assert-C5 (Has-C5 $opticalNotVerified 'ATAPI_OPTICAL' 'NOT_VERIFIED') 'missing raw INQUIRY never PASS'
+Assert-C5 (Has-C5 $opticalOkay 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE') 'Optical profile explicitly out of lab scope'
 Write-Host 'PASS: optical OS descriptor, direct INQUIRY, mismatch and fallback'
 
 $many = Test-CloakStorageC5 -Disks @($disk,$scsi)

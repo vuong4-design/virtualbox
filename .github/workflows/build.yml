@@ -313,6 +313,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
+          & '.github/scripts/Test-CloakLabHookWiring.ps1'
+          if (-not $?) { throw 'Lab storage C++ hook wiring guard failed' }
+          & '.github/scripts/test-cloak-lab-hook-wiring.ps1'
+          if (-not $?) { throw 'Lab storage hook wiring positive/negative tests failed' }
           & '.github/scripts/test-cloak-storage-s3-winquery.ps1'
           if (-not $?) { throw 'Storage S3 Windows storage descriptor tests failed' }
           & '.github/scripts/test-cloak-storage-s3-ata.ps1'
@@ -323,6 +327,12 @@ jobs:
           if (-not $?) { throw 'Storage S3 host capability fixture failed' }
           & '.github/scripts/test-cloak-storage-s3-collector.ps1'
           if (-not $?) { throw 'Storage S3 guest collector tests failed' }
+          & '.github/scripts/test-cloak-storage-s3-bundle.ps1'
+          if (-not $?) { throw 'Storage S3 versioned guest bundle integrity tests failed' }
+          & '.github/scripts/test-cloak-storage-s3-evidence.ps1'
+          if (-not $?) { throw 'Storage S3 observed guest evidence regression failed' }
+          & '.github/scripts/test-cloak-storage-s3-lifecycle.ps1'
+          if (-not $?) { throw 'Storage S3 lifecycle snapshot/cold-boot regression failed' }
 
       - name: Build VirtualBox
         shell: pwsh
