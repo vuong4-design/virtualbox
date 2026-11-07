@@ -318,7 +318,7 @@ jobs:
           & '.github/scripts/test-cloak-lab-hook-wiring.ps1'
           if (-not $?) { throw 'Lab storage hook wiring positive/negative tests failed' }
           & '.github/scripts/test-cloak-lab-optical-host.ps1'
-          if (-not $?) { throw 'Lab optical host opt-in/poweroff regression failed' }
+          if (-not $?) { throw 'Lab optical/SCSI host opt-in/poweroff regression failed' }
           & '.github/scripts/test-cloak-storage-s3-winquery.ps1'
           if (-not $?) { throw 'Storage S3 Windows storage descriptor tests failed' }
           & '.github/scripts/test-cloak-storage-s3-ata.ps1'

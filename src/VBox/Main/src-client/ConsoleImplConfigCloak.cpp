@@ -110,6 +110,10 @@ static const MACHINEPROFILE *cloakGetLabProfile(void)
         Profile.pszAcpiOemId = "LAB";
         Profile.pszAcpiOemTabId = "LAB0";
         Profile.pszAtaModel = "LAB ATA DISK";
+        Profile.pszAtapiVendor = "LAB";
+        Profile.pszAtapiProduct = "CD-ROM";
+        Profile.pszInquiryVendor = "LAB";
+        Profile.pszInquiryProduct = "SCSI DISK";
         Profile.uI440FxVendorId = 0x8086;
         Profile.uI440FxDeviceId = 0x1237;
         Profile.uPiix3IsaDeviceId = 0x7000;
@@ -545,6 +549,17 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         else if (RT_FAILURE(vrc))
             return vrc;
     }
+    /* Generic SCSI has a separate opt-in so a host upgrade cannot silently
+     * alter existing SCSI/SAS/VirtioSCSI/USB inquiry strings. */
+    bool fLabScsiEnabled = false;
+    if (fLabProfile)
+    {
+        vrc = cloakQueryBool(mpVMM, pCloak, "StorageLabScsiEnabled", &fLabScsiEnabled);
+        if (vrc == VERR_CFGM_VALUE_NOT_FOUND)
+            fLabScsiEnabled = false;
+        else if (RT_FAILURE(vrc))
+            return vrc;
+    }
     /* S0/S1 lab: enumerate actual attached media, not guessed guest bus IDs. */
     if (fLabProfile && pProfile->pszAtaModel)
     {
@@ -555,6 +570,7 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
 
         unsigned cApplied = 0, cEligible = 0, cUnsupported = 0, cOptical = 0;
         unsigned cOpticalEligible = 0, cOpticalApplied = 0;
+        unsigned cScsiPresent = 0, cScsiEligible = 0, cScsiApplied = 0;
         for (size_t i = 0; i < Controllers.size(); ++i)
         {
             StorageControllerType_T enmCtrl;
@@ -565,6 +581,12 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
             if (!pszDevice)
                 return VERR_NOT_SUPPORTED;
             bool const fSupported = !RTStrCmp(pszDevice, "ahci") || !RTStrCmp(pszDevice, "piix3ide");
+            StorageBus_T enmBus;
+            hrc = Controllers[i]->COMGETTER(Bus)(&enmBus);
+            if (FAILED(hrc))
+                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+            bool const fScsiPath = enmBus == StorageBus_SCSI || enmBus == StorageBus_SAS
+                                || enmBus == StorageBus_VirtioSCSI || enmBus == StorageBus_USB;
             ULONG uInstance = 0;
             Bstr bstrCtrlName;
             hrc = Controllers[i]->COMGETTER(Instance)(&uInstance);
@@ -584,6 +606,132 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                 hrc = Attachments[j]->COMGETTER(Type)(&enmType);
                 if (FAILED(hrc))
                     return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+
+                /* H3/H4: SCSI/SAS/VirtioSCSI/USB MSD all pass through DrvSCSI.
+                 * Keep this surface independently opt-in and never override a
+                 * physical host drive.  SBC HDDs also get root-medium-stable
+                 * VPD 0x80/0x83 identity; MMC/DVD VPD remains untouched. */
+                if (fScsiPath && (enmType == DeviceType_HardDisk || enmType == DeviceType_DVD))
+                {
+                    cScsiPresent++;
+                    if (!fLabScsiEnabled)
+                        continue;
+
+                    ComPtr<IMedium> pScsiMedium;
+                    hrc = Attachments[j]->COMGETTER(Medium)(pScsiMedium.asOutParam());
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    BOOL fHostDrive = FALSE;
+                    if (!pScsiMedium.isNull())
+                    {
+                        hrc = pScsiMedium->COMGETTER(HostDrive)(&fHostDrive);
+                        if (FAILED(hrc))
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    }
+                    BOOL fPassThrough = FALSE;
+                    if (enmType == DeviceType_DVD)
+                    {
+                        hrc = Attachments[j]->COMGETTER(Passthrough)(&fPassThrough);
+                        if (FAILED(hrc))
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    }
+                    if (fHostDrive || fPassThrough)
+                        continue;
+                    cScsiEligible++;
+
+                    LONG iScsiPort = -1, iScsiDevice = -1;
+                    hrc = Attachments[j]->COMGETTER(Port)(&iScsiPort);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    hrc = Attachments[j]->COMGETTER(Device)(&iScsiDevice);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    unsigned uScsiLun = 0;
+                    hrc = i_storageBusPortDeviceToLun(enmBus, iScsiPort, iScsiDevice, uScsiLun);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+
+                    PCFGMNODE pScsiLun = enmBus == StorageBus_USB
+                        ? mpVMM->pfnCFGMR3GetChildF(pRoot, "USB/%s/%d/LUN#%u", pszDevice, iScsiPort, uScsiLun)
+                        : mpVMM->pfnCFGMR3GetChildF(pRoot, "Devices/%s/%u/LUN#%u", pszDevice, uInstance, uScsiLun);
+                    if (!pScsiLun)
+                        return VERR_NOT_FOUND;
+                    char szDriver[16] = {};
+                    vrc = Cfgm.pfnQueryString(Cfgm.pvUser, pScsiLun, "Driver", szDriver, sizeof(szDriver));
+                    if (RT_FAILURE(vrc) || RTStrCmp(szDriver, "SCSI"))
+                    {
+                        RTMemWipeThoroughly(szDriver, sizeof(szDriver), 3);
+                        return RT_FAILURE(vrc) ? vrc : VERR_MISMATCH;
+                    }
+                    RTMemWipeThoroughly(szDriver, sizeof(szDriver), 3);
+
+                    PCFGMNODE pScsiCfg = mpVMM->pfnCFGMR3GetChild(pScsiLun, "Config");
+                    if (!pScsiCfg)
+                    {
+                        vrc = mpVMM->pfnCFGMR3InsertNode(pScsiLun, "Config", &pScsiCfg);
+                        if (RT_FAILURE(vrc))
+                            return vrc;
+                    }
+                    char szScsiSerial[21] = {};
+                    const char *pszScsiSerial = NULL;
+                    if (enmType == DeviceType_HardDisk)
+                    {
+                        if (pScsiMedium.isNull())
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                        ComPtr<IMedium> pScsiRootMedium = pScsiMedium;
+                        unsigned cScsiMediumParents = 0;
+                        for (;;)
+                        {
+                            ComPtr<IMedium> pParentMedium;
+                            hrc = pScsiRootMedium->COMGETTER(Parent)(pParentMedium.asOutParam());
+                            if (FAILED(hrc))
+                                return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                            if (pParentMedium.isNull())
+                                break;
+                            if (++cScsiMediumParents > 128)
+                            {
+                                LogRel(("Cloak: SCSI storage parent chain exceeds safety bound\n"));
+                                return VERR_INVALID_STATE;
+                            }
+                            pScsiRootMedium = pParentMedium;
+                        }
+                        Bstr bstrScsiMediumId;
+                        hrc = pScsiRootMedium->COMGETTER(Id)(bstrScsiMediumId.asOutParam());
+                        if (FAILED(hrc))
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                        Utf8Str strScsiMediumId(bstrScsiMediumId);
+                        vrc = CloakStorageLabSerial(u64Serial, strScsiMediumId.c_str(),
+                                                    szScsiSerial, sizeof(szScsiSerial));
+                        if (RT_FAILURE(vrc))
+                            return vrc;
+                        pszScsiSerial = szScsiSerial;
+                    }
+                    CLOAKSTORAGESCSIIDENTITY ScsiIdentity =
+                    {
+                        enmType == DeviceType_DVD ? pProfile->pszAtapiVendor : pProfile->pszInquiryVendor,
+                        enmType == DeviceType_DVD ? pProfile->pszAtapiProduct : pProfile->pszInquiryProduct,
+                        "LAB1",
+                        pszScsiSerial
+                    };
+                    vrc = CloakStorageMaterializeScsi(&Cfgm, pScsiCfg, &ScsiIdentity);
+                    if (RT_SUCCESS(vrc))
+                        vrc = CloakStorageValidateLabScsiEffective(&Cfgm, pScsiCfg, &ScsiIdentity);
+                    RTMemWipeThoroughly(szScsiSerial, sizeof(szScsiSerial), 3);
+                    if (RT_FAILURE(vrc))
+                    {
+                        LogRel(("Cloak: invalid synthetic SCSI lab CFGM at %s/%u/LUN#%u, vrc=%Rrc\n",
+                                pszDevice, enmBus == StorageBus_USB ? (unsigned)iScsiPort : (unsigned)uInstance,
+                                uScsiLun, vrc));
+                        return vrc;
+                    }
+                    cScsiApplied++;
+                    LogRel(("Cloak: synthetic SCSI INQUIRY%s at %s/%u/LUN#%u materialized\n",
+                            enmType == DeviceType_HardDisk ? "/VPD80/VPD83" : "",
+                            pszDevice, enmBus == StorageBus_USB ? (unsigned)iScsiPort : (unsigned)uInstance,
+                            uScsiLun));
+                    continue;
+                }
+
                 if (enmType == DeviceType_DVD)
                 {
                     cOptical++;
@@ -759,16 +907,21 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         if (RT_SUCCESS(vrc))
             vrc = CloakStorageValidateLabOpticalCoverage(fLabOpticalEnabled, cOptical,
                                                          cOpticalEligible, cOpticalApplied);
+        if (RT_SUCCESS(vrc))
+            vrc = CloakStorageValidateLabScsiCoverage(fLabScsiEnabled, cScsiPresent,
+                                                      cScsiEligible, cScsiApplied);
         if (RT_FAILURE(vrc))
         {
-            LogRel(("Cloak: lab storage/optical coverage incomplete or unsupported, vrc=%Rrc\n", vrc));
+            LogRel(("Cloak: lab storage/optical/SCSI coverage incomplete or unsupported, vrc=%Rrc\n", vrc));
             return vrc;
         }
         LogRel(("Cloak: lab storage inventory: %u eligible ATA/AHCI HDD(s), %u unsupported HDD(s), "
-                "%u optical attachment(s) (%u eligible, %u materialized), %u HDD materialized; "
-                "StorageLabEnabled=%RTbool, StorageLabOpticalEnabled=%RTbool\n",
-                cEligible, cUnsupported, cOptical, cOpticalEligible, cOpticalApplied,
-                cApplied, fLabStorageEnabled, fLabOpticalEnabled));
+                "%u ATA optical attachment(s) (%u eligible, %u materialized), %u HDD materialized; "
+                "%u SCSI-path attachment(s) (%u eligible, %u materialized); "
+                "StorageLabEnabled=%RTbool, StorageLabOpticalEnabled=%RTbool, StorageLabScsiEnabled=%RTbool\n",
+                cEligible, cUnsupported, cOptical, cOpticalEligible, cOpticalApplied, cApplied,
+                cScsiPresent, cScsiEligible, cScsiApplied,
+                fLabStorageEnabled, fLabOpticalEnabled, fLabScsiEnabled));
     }
 
     try

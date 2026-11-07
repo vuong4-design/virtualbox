@@ -1182,6 +1182,40 @@ static void testStorageLabMaterialization(RTTEST hTest)
     RTTESTI_CHECK_RC(CloakStorageValidateLabCoverage(true, 1, 2), VERR_MISMATCH);
     RTTESTI_CHECK_RC(CloakStorageMaterialize(&VTable, pDiskA, NULL), VERR_INVALID_PARAMETER);
     RTTESTI_CHECK_RC(CloakStorageValidateLabEffective(&VTable, pDiskA, NULL), VERR_INVALID_PARAMETER);
+
+    TESTCFGMNODE *pScsiCfg = testCfgmAddNode(&Cfgm, "Devices/virtio-scsi/0/LUN#0/Config");
+    CLOAKSTORAGESCSIIDENTITY ScsiIdentity = { "LAB", "SCSI DISK", "LAB1", "LB0123456789ABCDEF" };
+    RTTESTI_CHECK_RC(CloakStorageMaterializeScsi(&VTable, pScsiCfg, &ScsiIdentity), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiCfg, &ScsiIdentity), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pScsiCfg, "InquiryVendorId"), "LAB"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pScsiCfg, "InquiryProductId"), "SCSI DISK"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pScsiCfg, "InquiryRevision"), "LAB1"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pScsiCfg, "InquirySerialNumber"), "LB0123456789ABCDEF"));
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquiryProductId", "OTHER"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageMaterializeScsi(&VTable, pScsiCfg, &ScsiIdentity), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiCfg, &ScsiIdentity), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquiryProductId", "SCSI DISK"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquiryRevision", "TOO-LONG"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiCfg, &ScsiIdentity), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquiryRevision", "LAB1"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquirySerialNumber", "LB00000000000000"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiCfg, &ScsiIdentity), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pScsiCfg, "InquirySerialNumber", "LB0123456789ABCDEF"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiCfg, &ScsiIdentity), VINF_SUCCESS);
+    CLOAKSTORAGESCSIIDENTITY InvalidScsi = { "TOO-LONG-VENDOR", "SCSI DISK", "LAB1", "LB0123456789ABCDEF" };
+    RTTESTI_CHECK_RC(CloakStorageMaterializeScsi(&VTable, pScsiCfg, &InvalidScsi), VERR_INVALID_PARAMETER);
+    CLOAKSTORAGESCSIIDENTITY InvalidScsiSerial = { "LAB", "SCSI DISK", "LAB1", "LB0123456789ABCDEFEXTRA" };
+    RTTESTI_CHECK_RC(CloakStorageMaterializeScsi(&VTable, pScsiCfg, &InvalidScsiSerial), VERR_INVALID_PARAMETER);
+    TESTCFGMNODE *pScsiDvdCfg = testCfgmAddNode(&Cfgm, "Devices/virtio-scsi/0/LUN#1/Config");
+    CLOAKSTORAGESCSIIDENTITY ScsiDvdIdentity = { "LAB", "CD-ROM", "LAB1", NULL };
+    RTTESTI_CHECK_RC(CloakStorageMaterializeScsi(&VTable, pScsiDvdCfg, &ScsiDvdIdentity), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiEffective(&VTable, pScsiDvdCfg, &ScsiDvdIdentity), VINF_SUCCESS);
+    RTTESTI_CHECK(!testCfgmFindValue(pScsiDvdCfg, "InquirySerialNumber"));
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiCoverage(false, 0, 0, 0), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiCoverage(true, 0, 0, 0), VERR_NOT_FOUND);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiCoverage(true, 2, 2, 2), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiCoverage(true, 2, 1, 1), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabScsiCoverage(true, 2, 2, 1), VERR_MISMATCH);
     testCfgmDestroy(&Cfgm);
 }
 

@@ -136,6 +136,19 @@ typedef struct DRVSCSI
     /** Pointer to the status LED for this drive. */
     PPDMLED                 pLed;
 
+    /** Optional lab-only Standard SCSI INQUIRY override. */
+    bool                    fInquiryOverride;
+    /** INQUIRY vendor ID (8 bytes maximum plus terminator). */
+    char                    szInquiryVendorId[9];
+    /** INQUIRY product ID (16 bytes maximum plus terminator). */
+    char                    szInquiryProductId[17];
+    /** INQUIRY revision (4 bytes maximum plus terminator). */
+    char                    szInquiryRevision[5];
+    /** Optional stable unit serial override for SBC VPD 0x80/0x83. */
+    bool                    fInquirySerialOverride;
+    /** Unit serial number (20 bytes maximum plus terminator). */
+    char                    szInquirySerialNumber[21];
+
     /** VSCSI device handle. */
     VSCSIDEVICE             hVScsiDevice;
     /** VSCSI LUN handle. */
@@ -498,11 +511,37 @@ static DECLCALLBACK(int) drvscsiQueryInqStrings(VSCSILUN hVScsiLun, void *pvScsi
     RT_NOREF(hVScsiLun);
     PDRVSCSI pThis = (PDRVSCSI)pvScsiLunUser;
 
-    if (pThis->pDevMediaPort->pfnQueryScsiInqStrings)
+    if (pThis->fInquiryOverride)
+    {
+        if (ppszVendorId)
+            *ppszVendorId = pThis->szInquiryVendorId;
+        if (ppszProductId)
+            *ppszProductId = pThis->szInquiryProductId;
+        if (ppszProductLevel)
+            *ppszProductLevel = pThis->szInquiryRevision;
+        return VINF_SUCCESS;
+    }
+
+    if (pThis->pDevMediaPort && pThis->pDevMediaPort->pfnQueryScsiInqStrings)
         return pThis->pDevMediaPort->pfnQueryScsiInqStrings(pThis->pDevMediaPort, ppszVendorId,
                                                             ppszProductId, ppszProductLevel);
 
     return VERR_NOT_FOUND;
+}
+
+/**
+ * @interface_method_impl{VSCSILUNIOCALLBACKS,pfnVScsiLunQuerySerialNumber}
+ */
+static DECLCALLBACK(int) drvscsiQuerySerialNumber(VSCSILUN hVScsiLun, void *pvScsiLunUser,
+                                                  const char **ppszSerialNumber)
+{
+    RT_NOREF(hVScsiLun);
+    PDRVSCSI pThis = (PDRVSCSI)pvScsiLunUser;
+    if (!pThis->fInquirySerialOverride)
+        return VERR_NOT_FOUND;
+    AssertPtrReturn(ppszSerialNumber, VERR_INVALID_POINTER);
+    *ppszSerialNumber = pThis->szInquirySerialNumber;
+    return VINF_SUCCESS;
 }
 
 /* -=-=-=-=- IPortEx -=-=-=-=- */
@@ -1352,7 +1391,6 @@ static DECLCALLBACK(void) drvscsiDestruct(PPDMDRVINS pDrvIns)
  */
 static DECLCALLBACK(int) drvscsiConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, uint32_t fFlags)
 {
-    RT_NOREF(pCfg);
     PDMDRV_CHECK_VERSIONS_RETURN(pDrvIns);
     PDRVSCSI pThis = PDMINS_2_DATA(pDrvIns, PDRVSCSI);
     LogFlowFunc(("pDrvIns=%#p pCfg=%#p\n", pDrvIns, pCfg));
@@ -1441,12 +1479,45 @@ static DECLCALLBACK(int) drvscsiConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, ui
     /*
      * Validate and read configuration.
      */
-    PDMDRV_VALIDATE_CONFIG_RETURN(pDrvIns, "", "");
+    PDMDRV_VALIDATE_CONFIG_RETURN(pDrvIns, "InquiryVendorId|InquiryProductId|InquiryRevision|InquirySerialNumber", "");
+    int rc = pDrvIns->pHlpR3->pfnCFGMQueryStringDef(pCfg, "InquiryVendorId",
+                                                     pThis->szInquiryVendorId,
+                                                     sizeof(pThis->szInquiryVendorId), "");
+    if (RT_FAILURE(rc))
+        return PDMDrvHlpVMSetError(pDrvIns, rc, RT_SRC_POS,
+                                   N_("SCSI configuration error: invalid InquiryVendorId"));
+    rc = pDrvIns->pHlpR3->pfnCFGMQueryStringDef(pCfg, "InquiryProductId",
+                                                pThis->szInquiryProductId,
+                                                sizeof(pThis->szInquiryProductId), "");
+    if (RT_FAILURE(rc))
+        return PDMDrvHlpVMSetError(pDrvIns, rc, RT_SRC_POS,
+                                   N_("SCSI configuration error: invalid InquiryProductId"));
+    rc = pDrvIns->pHlpR3->pfnCFGMQueryStringDef(pCfg, "InquiryRevision",
+                                                pThis->szInquiryRevision,
+                                                sizeof(pThis->szInquiryRevision), "");
+    if (RT_FAILURE(rc))
+        return PDMDrvHlpVMSetError(pDrvIns, rc, RT_SRC_POS,
+                                   N_("SCSI configuration error: invalid InquiryRevision"));
+    rc = pDrvIns->pHlpR3->pfnCFGMQueryStringDef(pCfg, "InquirySerialNumber",
+                                                pThis->szInquirySerialNumber,
+                                                sizeof(pThis->szInquirySerialNumber), "");
+    if (RT_FAILURE(rc))
+        return PDMDrvHlpVMSetError(pDrvIns, rc, RT_SRC_POS,
+                                   N_("SCSI configuration error: invalid InquirySerialNumber"));
+
+    bool const fVendor = pThis->szInquiryVendorId[0] != '\0';
+    bool const fProduct = pThis->szInquiryProductId[0] != '\0';
+    bool const fRevision = pThis->szInquiryRevision[0] != '\0';
+    if ((fVendor || fProduct || fRevision) && !(fVendor && fProduct && fRevision))
+        return PDMDrvHlpVMSetError(pDrvIns, VERR_INVALID_PARAMETER, RT_SRC_POS,
+                                   N_("SCSI configuration error: InquiryVendorId, InquiryProductId and InquiryRevision must be set together"));
+    pThis->fInquiryOverride = fVendor && fProduct && fRevision;
+    pThis->fInquirySerialOverride = pThis->szInquirySerialNumber[0] != '\0';
 
     /*
      * Try attach driver below and query it's media interface.
      */
-    int rc = PDMDrvHlpAttach(pDrvIns, fFlags, &pThis->pDrvBase);
+    rc = PDMDrvHlpAttach(pDrvIns, fFlags, &pThis->pDrvBase);
     if (RT_FAILURE(rc))
         return rc;
 
@@ -1500,6 +1571,7 @@ static DECLCALLBACK(int) drvscsiConstruct(PPDMDRVINS pDrvIns, PCFGMNODE pCfg, ui
     pThis->VScsiIoCallbacks.pfnVScsiLunGetFeatureFlags                   = drvscsiGetFeatureFlags;
     pThis->VScsiIoCallbacks.pfnVScsiLunMediumSetLock                     = drvscsiSetLock;
     pThis->VScsiIoCallbacks.pfnVScsiLunQueryInqStrings                   = drvscsiQueryInqStrings;
+    pThis->VScsiIoCallbacks.pfnVScsiLunQuerySerialNumber                  = drvscsiQuerySerialNumber;
 
     rc = VSCSIDeviceCreate(&pThis->hVScsiDevice, drvscsiIoReqVScsiReqCompleted, pThis);
     AssertMsgReturn(RT_SUCCESS(rc), ("Failed to create VSCSI device rc=%Rrc\n", rc), rc);

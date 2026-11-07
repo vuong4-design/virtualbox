@@ -78,19 +78,78 @@ static DECLCALLBACK(int) vscsiLunSbcInit(PVSCSILUNINT pVScsiLun)
     if (RT_SUCCESS(rc))
         rc = vscsiVpdPagePoolInit(&pVScsiLunSbc->VpdPagePool);
 
-    /* Create device identification page - mandatory. */
+    const char *pszUnitSerial = NULL;
+    const char *pszVpdVendor = "VBOX";
+    size_t cchUnitSerial = 0;
+    bool fUnitSerialPage = false;
+    if (RT_SUCCESS(rc))
+    {
+        int rcSerial = vscsiLunQuerySerialNumber(pVScsiLun, &pszUnitSerial);
+        if (RT_SUCCESS(rcSerial))
+        {
+            if (!pszUnitSerial || !*pszUnitSerial || strlen(pszUnitSerial) > 20)
+                rc = VERR_INVALID_PARAMETER;
+            else
+            {
+                cchUnitSerial = strlen(pszUnitSerial);
+                const char *pszProductId = "HARDDISK";
+                const char *pszProductLevel = "1.0";
+                int rcTmp = vscsiLunQueryInqStrings(pVScsiLun, &pszVpdVendor, &pszProductId, &pszProductLevel);
+                if (RT_FAILURE(rcTmp) && rcTmp != VERR_NOT_FOUND)
+                    rc = rcTmp;
+                if (!pszVpdVendor || !*pszVpdVendor)
+                    rc = VERR_INVALID_PARAMETER;
+            }
+        }
+        else if (rcSerial != VERR_NOT_FOUND)
+            rc = rcSerial;
+    }
+
+    /* Create device identification page - mandatory.  Without an explicit
+     * unit serial callback preserve the historical empty Solaris-compatible
+     * stub.  With a serial, emit one SPC T10 vendor identifier designator. */
     if (RT_SUCCESS(rc))
     {
         PVSCSIVPDPAGEDEVID pDevIdPage;
+        size_t const cbDevIdPage = VSCSI_VPD_DEVID_SIZE
+                                 + (cchUnitSerial ? VSCSI_VPD_DEVID_DESC_HDR_SIZE + 8 + cchUnitSerial : 0);
 
         rc = vscsiVpdPagePoolAllocNewPage(&pVScsiLunSbc->VpdPagePool, VSCSI_VPD_DEVID_NUMBER,
-                                          VSCSI_VPD_DEVID_SIZE, (uint8_t **)&pDevIdPage);
+                                          cbDevIdPage, (uint8_t **)&pDevIdPage);
         if (RT_SUCCESS(rc))
         {
-            /** @todo Not conforming to the SPC spec but Solaris needs at least a stub to work. */
             pDevIdPage->u5PeripheralDeviceType = SCSI_INQUIRY_DATA_PERIPHERAL_DEVICE_TYPE_DIRECT_ACCESS;
             pDevIdPage->u3PeripheralQualifier  = SCSI_INQUIRY_DATA_PERIPHERAL_QUALIFIER_CONNECTED;
-            pDevIdPage->u16PageLength          = RT_H2BE_U16(0x0);
+            pDevIdPage->u16PageLength          = RT_H2BE_U16((uint16_t)(cbDevIdPage - VSCSI_VPD_DEVID_SIZE));
+            if (cchUnitSerial)
+            {
+                PVSCSIVPDDEVIDDESC pDesc = (PVSCSIVPDDEVIDDESC)((uint8_t *)pDevIdPage + VSCSI_VPD_DEVID_SIZE);
+                pDesc->u8ProtocolAndCodeSet   = VSCSI_VPD_DEVID_CODE_SET_ASCII;
+                pDesc->u8PivAssociationAndType = VSCSI_VPD_DEVID_IDENTIFIER_TYPE_T10_VENDOR;
+                pDesc->u8Reserved             = 0;
+                pDesc->cbIdentifier           = (uint8_t)(8 + cchUnitSerial);
+                memset(pDesc->abIdentifier, ' ', 8);
+                memcpy(pDesc->abIdentifier, pszVpdVendor, RT_MIN(strlen(pszVpdVendor), (size_t)8));
+                memcpy(&pDesc->abIdentifier[8], pszUnitSerial, cchUnitSerial);
+            }
+            cVpdPages++;
+        }
+    }
+
+    /* Unit serial number page is optional and only appears when the backend
+     * explicitly supplies the synthetic serial. */
+    if (RT_SUCCESS(rc) && cchUnitSerial)
+    {
+        PVSCSIVPDPAGEUNITSERIAL pSerialPage;
+        rc = vscsiVpdPagePoolAllocNewPage(&pVScsiLunSbc->VpdPagePool, VSCSI_VPD_UNIT_SERIAL_NUMBER,
+                                          VSCSI_VPD_UNIT_SERIAL_SIZE + cchUnitSerial, (uint8_t **)&pSerialPage);
+        if (RT_SUCCESS(rc))
+        {
+            pSerialPage->u5PeripheralDeviceType = SCSI_INQUIRY_DATA_PERIPHERAL_DEVICE_TYPE_DIRECT_ACCESS;
+            pSerialPage->u3PeripheralQualifier  = SCSI_INQUIRY_DATA_PERIPHERAL_QUALIFIER_CONNECTED;
+            pSerialPage->u16PageLength          = RT_H2BE_U16((uint16_t)cchUnitSerial);
+            memcpy(pSerialPage->abSerial, pszUnitSerial, cchUnitSerial);
+            fUnitSerialPage = true;
             cVpdPages++;
         }
     }
@@ -171,6 +230,8 @@ static DECLCALLBACK(int) vscsiLunSbcInit(PVSCSILUNINT pVScsiLun)
             pVpdPages->u16PageLength          = RT_H2BE_U16(cVpdPages);
 
             pVpdPages->abVpdPages[idxVpdPage++] = VSCSI_VPD_SUPPORTED_PAGES_NUMBER;
+            if (fUnitSerialPage)
+                pVpdPages->abVpdPages[idxVpdPage++] = VSCSI_VPD_UNIT_SERIAL_NUMBER;
             pVpdPages->abVpdPages[idxVpdPage++] = VSCSI_VPD_DEVID_NUMBER;
 
             if (pVScsiLun->fFeatures & VSCSI_LUN_FEATURE_UNMAP)

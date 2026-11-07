@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-  Host-side offline test for the separately opted-in ATAPI lab switch.
+  Host-side offline test for separately opted-in ATAPI and SCSI lab switches.
   Uses a mock VBoxManage.ps1 in temp; never contacts a real VM.
 #>
 Set-StrictMode -Version Latest
@@ -22,7 +22,7 @@ try {
     $state=[pscustomobject]@{
         VMState='poweroff';Enabled='integer:1';Profile='lab-dmi-v1'
         StorageLabEnabled='integer:1';StorageLabRootSerialEnabled='integer:1'
-        StorageLabOpticalEnabled='integer:0';SetCount=0
+        StorageLabOpticalEnabled='integer:0';StorageLabScsiEnabled='integer:0';SetCount=0
     }
     Write-State $state
     $mockText=@'
@@ -58,12 +58,20 @@ exit 20
     Assert-Test ((Read-State).StorageLabOpticalEnabled -eq 'integer:1') 'Optical lab explicitly enabled'
     & $controller -VM test -VBoxManage $mock -Action DisableOptical | Out-Null
     Assert-Test ((Read-State).StorageLabOpticalEnabled -eq 'integer:0') 'Optical lab explicitly disabled'
-    Write-Host 'PASS: Status/WhatIf/EnableOptical/DisableOptical only use mock VBoxManage'
+    & $controller -VM test -VBoxManage $mock -Action EnableScsi -WhatIf | Out-Null
+    Assert-Test ((Read-State).StorageLabScsiEnabled -eq 'integer:0') 'SCSI WhatIf did not write ExtraData'
+    & $controller -VM test -VBoxManage $mock -Action EnableScsi | Out-Null
+    Assert-Test ((Read-State).StorageLabScsiEnabled -eq 'integer:1') 'SCSI lab explicitly enabled'
+    & $controller -VM test -VBoxManage $mock -Action DisableScsi | Out-Null
+    Assert-Test ((Read-State).StorageLabScsiEnabled -eq 'integer:0') 'SCSI lab explicitly disabled'
+    Write-Host 'PASS: Status/WhatIf/Enable/Disable optical and SCSI only use mock VBoxManage'
 
     $st=Read-State;$st.VMState='running';Write-State $st
     Expect-Rejection { & $controller -VM test -VBoxManage $mock -Action EnableOptical } 'Shut down VM'
+    Expect-Rejection { & $controller -VM test -VBoxManage $mock -Action EnableScsi } 'Shut down VM'
     $st=Read-State;$st.VMState='poweroff';$st.Profile='another-profile';Write-State $st
     Expect-Rejection { & $controller -VM test -VBoxManage $mock -Action EnableOptical } 'lab-dmi-v1'
+    Expect-Rejection { & $controller -VM test -VBoxManage $mock -Action EnableScsi } 'lab-dmi-v1'
     $st=Read-State;$st.Profile='lab-dmi-v1';$st.StorageLabEnabled='integer:0';Write-State $st
     & $controller -VM test -VBoxManage $mock -Action EnableOptical | Out-Null
     Assert-Test ((Read-State).StorageLabOpticalEnabled -eq 'integer:1') 'Optical can be enabled independently of HDD lab mode'
@@ -72,11 +80,12 @@ exit 20
     $st=Read-State
     Assert-Test ($st.StorageLabEnabled -eq 'integer:0' -and
                  $st.StorageLabRootSerialEnabled -eq 'integer:0' -and
-                 $st.StorageLabOpticalEnabled -eq 'integer:0') 'Global Disable also clears optical opt-in'
+                 $st.StorageLabOpticalEnabled -eq 'integer:0' -and
+                 $st.StorageLabScsiEnabled -eq 'integer:0') 'Global Disable also clears optical and SCSI opt-ins'
     Write-Host 'PASS: running/wrong-profile rejected; global Disable clears all storage lab switches'
 }
 finally {
     Remove-Item Env:CLOAK_OPTICAL_HOST_TEST_STATE -ErrorAction SilentlyContinue
     if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}
 }
-Write-Host 'PASS: lab optical host switch regression (synthetic only)'
+Write-Host 'PASS: lab optical/SCSI host switch regression (synthetic only)'

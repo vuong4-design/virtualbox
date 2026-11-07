@@ -131,13 +131,19 @@ $scsiResult = Test-CloakStorageC5 -Disks @($scsi)
 Assert-C5 (Has-C5 $scsiResult 'SCSI_INQUIRY' 'PASS') 'SCSI INQUIRY identity'
 Assert-C5 (Has-C5 $scsiResult 'SCSI_VPD83' 'NOT_VERIFIED') 'VPD83 not assumed proven'
 Assert-C5 ($scsiResult.Overall -eq 'PARTIAL') 'SCSI fixture incomplete'
+$scsiWithVpd = Copy-C5 $scsi
+$scsiWithVpd.Raw | Add-Member -NotePropertyName Vpd83 -NotePropertyValue ([pscustomobject]@{
+    Source='SCSI_PASS_THROUGH_INQUIRY_EVPD83';DeviceType=0;IdentifierCount=1;HasDesignators=$true
+}) -Force
+$scsiVpdResult = Test-CloakStorageC5 -Disks @($scsiWithVpd)
+Assert-C5 (Has-C5 $scsiVpdResult 'SCSI_VPD83' 'PASS') 'SCSI VPD83 positive designator fixture'
 $scsiMismatch = Copy-C5 $scsi
 $scsiMismatch.Raw.ScsiProduct = 'OTHER'
 $scsiBad = Test-CloakStorageC5 -Disks @($scsiMismatch)
 Assert-C5 (Has-C5 $scsiBad 'SCSI_INQUIRY' 'FAIL') 'SCSI INQUIRY mismatch'
 $withOptical = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @([pscustomobject]@{Name='CD-ROM'})
 Assert-C5 (Has-C5 $withOptical 'ATAPI_OPTICAL' 'NOT_VERIFIED') 'optical not silently pass'
-Write-Host 'PASS: SCSI INQUIRY, VPD83 coverage gap, optical coverage gap'
+Write-Host 'PASS: SCSI INQUIRY, VPD83 absent/positive-designator fixtures, optical coverage gap'
 
 $opticalFixture = [pscustomobject]@{
     Index=0; PnpVendorProduct='VEN_VBOX&PROD_CD-ROM'

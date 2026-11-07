@@ -840,12 +840,123 @@ the VM fully and run on HOST:
 .\.github\scripts\Set-CloakLabStorage.ps1 -Action DisableOptical -VM test -VBoxManage $vbm
 ~~~
 
-**Deferred:** snapshot/restore runtime testing; VSCSI, USB MSD,
-HostDVD profile materializers; persistent logical drive ID; full
-SMART/TRIM/rotation capability implementations. CI runs static source
-guards and PowerShell tests BEFORE building, then native `tstCloakConfig`
-as a separate compiled test stage. Do not claim H2 runtime PASS until
-the new host build boots and the B4 guest JSON is inspected.
+**Deferred after H2:** snapshot/restore runtime testing; generic SCSI-family
+identity, HostDVD; persistent logical drive ID; full SMART/TRIM/rotation
+capability implementations. CI runs static source guards and PowerShell tests
+BEFORE building, then native `tstCloakConfig` as a separate compiled test stage.
+Do not claim H2 runtime PASS until the new host build boots and the B4 guest
+JSON is inspected.
+
+### S3.8 — H3/H4 generic SCSI INQUIRY + SBC VPD identity (build pending)
+
+H3/H4 uses one separate, disabled-by-default switch:
+`VBoxInternal/Cloak/StorageLabScsiEnabled=integer:1`. It covers virtual
+SCSI, SAS, VirtioSCSI and USB mass-storage attachments routed through the
+existing generic `DrvSCSI`. It does not require the ATA HDD or IDE/AHCI
+optical switch.
+
+H3 materializes Standard INQUIRY. A virtual hard disk reports
+`LAB / SCSI DISK / LAB1`; a virtual CD/DVD routed through `DrvSCSI` reports
+`LAB / CD-ROM / LAB1`. HostDrive and passthrough optical remain excluded.
+The enabled lab fails closed on conflicting ExtraData or incomplete eligible
+coverage rather than applying a partial identity.
+
+H4 adds identity VPD for **SBC hard disks only** under the same switch.
+For an eligible SCSI-path HDD, the config constructor walks to the root
+`IMedium`, derives the existing lab serial from the seed-derived serial
+stream plus root-medium UUID, and passes it to `DrvSCSI` as
+`InquirySerialNumber`. VSCSI then emits:
+
+- VPD `0x80` Unit Serial Number containing that synthetic serial.
+- VPD `0x83` with one ASCII T10 Vendor ID designator: the INQUIRY vendor
+  padded to eight bytes followed by the synthetic serial.
+- Supported-pages `0x00` advertises `0x80` only when the serial page was
+  actually created. Without the optional serial callback, SBC preserves the
+  historical empty `0x83` stub.
+
+The root-medium derivation is designed to avoid changing the SCSI HDD device
+identity merely because the current attachment is a differencing-image leaf.
+This is a source-level design property only; snapshot/restore runtime testing
+is still deferred.
+
+H4 deliberately does **not** reuse this behavior for MMC/DVD. The current
+`VSCSILunMmc` implementation assigns different AACS-related semantics/TODOs
+to pages in the `0x80`–`0x83` range. Virtual DVD Standard INQUIRY is covered
+by H3, but MMC VPD identity remains unchanged. Physical `DrvHostDVD` also
+remains unchanged.
+
+Neither H3 nor H4 changes UNMAP/TRIM support, non-rotational state, SMART,
+read-only state, or PCI/USB binding identifiers. `pfnQueryFeatures`,
+`PDMIMEDIAEX_FEATURE_F_DISCARD`, and `pfnIsNonRotational` continue to
+derive capability pages from the actual backend.
+
+Pre-build host checks:
+
+~~~powershell
+cd D:\virtualbox
+.\.github\scripts\Test-CloakLabHookWiring.ps1 -SourceRoot .
+.\.github\scripts\test-cloak-lab-hook-wiring.ps1
+.\.github\scripts\test-cloak-lab-optical-host.ps1
+.\.github\scripts\test-cloak-storage-s3.ps1
+~~~
+
+After those pass, use a short local compile ladder before the full host build.
+The H3/H4 files map to `VBoxDDU` (VSCSI), `VBoxDD` (DrvSCSI) and `VBoxC`
+(config constructor), so these targets catch most compile/link errors without
+waiting for the complete product:
+
+~~~powershell
+cd D:\virtualbox
+$kmk = "$env:KBUILD_PATH\bin\win.amd64\kmk.exe"
+$jobs = [Environment]::ProcessorCount
+
+& $kmk "-j$jobs" "VBoxDDU" "VBoxDD" "VBoxC"
+if ($LASTEXITCODE -ne 0) { throw "H3/H4 targeted build failed" }
+
+& $kmk "-j$jobs" "VBOX_WITH_TESTCASES=1" "tstCloakConfig"
+if ($LASTEXITCODE -ne 0) { throw "tstCloakConfig build failed" }
+.\out\win.amd64\release\bin\testcase\tstCloakConfig.exe
+if ($LASTEXITCODE -ne 0) { throw "tstCloakConfig runtime failed" }
+
+# Only after the targeted compile/test is clean:
+& $kmk "-j$jobs"
+if ($LASTEXITCODE -ne 0) { throw "full VirtualBox build failed" }
+~~~
+
+After the host build passes, use a disposable VM with a virtual
+SCSI/SAS/VirtioSCSI or USB MSD disk. With the VM fully powered off, confirm
+the current VBoxManage binary and enable the SCSI lab:
+
+~~~powershell
+cd D:\virtualbox
+$vbm='C:\path\to\current\VBoxManage.exe'
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Status -VM test -VBoxManage $vbm
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action EnableScsi -VM test -VBoxManage $vbm -WhatIf
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action EnableScsi -VM test -VBoxManage $vbm
+& $vbm startvm test --type gui
+~~~
+
+Inside Windows, the first runtime target for an HDD is Standard INQUIRY
+`LAB / SCSI DISK / LAB1`. The existing B4 read-only VPD83 collector should
+then report direct-access `DeviceType=0` with `IdentifierCount >= 1`; it
+intentionally redacts identifier contents. Do not print the raw synthetic
+serial in shared logs. VPD `0x80` can be inspected locally during debugging,
+but the current B4 JSON does not need to store its raw value.
+
+For a virtual DVD on the SCSI path, expect only Standard INQUIRY
+`LAB / CD-ROM / LAB1`; do not expect the SBC VPD80/VPD83 behavior. Capability
+pages must continue to follow the backend rather than the lab identity.
+
+If boot or identity validation fails, fully shut down the VM and disable the
+SCSI lab:
+
+~~~powershell
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action DisableScsi -VM test -VBoxManage $vbm
+~~~
+
+Snapshot/restore remains deferred for this batch. H3/H4 runtime acceptance
+requires the new host binary, a passing native test, cold boot, and guest
+evidence. Static/source PASS alone is not runtime proof.
 
 ## Roll back safely
 

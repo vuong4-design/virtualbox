@@ -5,7 +5,7 @@
 .DESCRIPTION
   Fails if critical source-level contracts disappear before expensive host
   compilation. Does NOT prove runtime behavior or VM-detection properties.
-  Unsupported optical/VSCSI/USB/HostDVD paths are explicitly marked residual.
+  Unsupported MMC VPD83/HostDVD and other residual paths are explicitly marked.
 #>
 [CmdletBinding()]
 param(
@@ -81,6 +81,11 @@ Add-CloakRow 'OPTICAL_ATTACHMENT_INVENTORY' 'OBSERVED_ONLY' $consolePath 'Optica
 
 $ata=Load-CloakSource 'src/VBox/Devices/Storage/DevATA.cpp'
 $ahci=Load-CloakSource 'src/VBox/Devices/Storage/DevAHCI.cpp'
+$drvScsi=Load-CloakSource 'src/VBox/Devices/Storage/DrvSCSI.cpp'
+$vscsiApi=Load-CloakSource 'include/VBox/vscsi.h'
+$vscsiInternal=Load-CloakSource 'src/VBox/Devices/Storage/VSCSI/VSCSIInternal.h'
+$vscsiSbc=Load-CloakSource 'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp'
+$vscsiVpd=Load-CloakSource 'src/VBox/Devices/Storage/VSCSI/VSCSIVpdPages.h'
 Require-CloakPattern $ata '"ATAPIVendorId"' 'PIIX3 optical CFGM backend sink'
 Require-CloakPattern $ahci '"ATAPIProductId"' 'AHCI optical CFGM backend sink'
 Require-CloakPattern $ata '"ATAPIRevision"' 'PIIX3 optical revision backend'
@@ -107,15 +112,37 @@ Require-CloakPattern $hostScriptContent "'EnableOptical','DisableOptical'" 'Powe
 Require-CloakPattern $hostScriptContent 'VBoxInternal/Cloak/StorageLabOpticalEnabled' 'Optical host ExtraData switch'
 Add-CloakRow 'ATAPI_PROFILE_MATERIALIZER' 'WIRED_LAB_OPTIN' $storagePath 'Synthetic virtual IDE/AHCI optical identity, separate disabled-by-default switch, no host passthrough'
 
+Require-CloakPattern $console 'StorageLabScsiEnabled' 'Independent SCSI Standard INQUIRY opt-in'
+Require-CloakPattern $console 'bool const fScsiPath = enmBus == StorageBus_SCSI' 'SCSI/SAS/VirtioSCSI/USB path classification'
+Require-CloakPattern $console 'CloakStorageMaterializeScsi(&Cfgm, pScsiCfg, &ScsiIdentity)' 'SCSI CFGM materializer in live path'
+Require-CloakPattern $console 'CloakStorageValidateLabScsiCoverage(fLabScsiEnabled, cScsiPresent,' 'SCSI coverage gate in live path'
+Require-CloakPattern $storage 'CloakStorageValidateLabScsiEffective(' 'Exact SCSI Standard INQUIRY validation'
+Require-CloakPattern $tests 'CloakStorageValidateLabScsiCoverage(true, 0, 0, 0)' 'SCSI negative coverage unit fixture'
+Require-CloakPattern $drvScsi 'InquiryVendorId|InquiryProductId|InquiryRevision|InquirySerialNumber' 'DrvSCSI accepted identity/VPD config keys'
+Require-CloakPattern $drvScsi 'if (pThis->fInquiryOverride)' 'DrvSCSI Standard INQUIRY override'
+Require-CloakPattern $drvScsi 'pfnVScsiLunQuerySerialNumber' 'DrvSCSI VPD serial callback wiring'
+Require-CloakPattern $console 'CloakStorageLabSerial(u64Serial, strScsiMediumId.c_str(),' 'SCSI HDD root-medium serial derivation'
+Require-CloakPattern $storage '"InquirySerialNumber"' 'SCSI serial materializer and exact validator'
+Require-CloakPattern $vscsiApi 'pfnVScsiLunQuerySerialNumber' 'VSCSI public callback surface'
+Require-CloakPattern $vscsiInternal 'vscsiLunQuerySerialNumber' 'VSCSI internal serial callback wrapper'
+Require-CloakPattern $vscsiSbc 'VSCSI_VPD_UNIT_SERIAL_NUMBER' 'SBC VPD 0x80 materialization'
+Require-CloakPattern $vscsiSbc 'VSCSI_VPD_DEVID_IDENTIFIER_TYPE_T10_VENDOR' 'SBC VPD 0x83 T10 designator materialization'
+Require-CloakPattern $vscsiVpd 'VSCSI_VPD_DEVID_DESC_HDR_SIZE' 'SPC VPD 0x83 descriptor definition'
+Require-CloakPattern $drvScsi 'PDMIMEDIAEX_FEATURE_F_DISCARD' 'UNMAP capability remains backend-derived'
+Require-CloakPattern $drvScsi 'pfnIsNonRotational' 'Rotation capability remains backend-derived'
+Require-CloakPattern $hostScriptContent "'EnableScsi','DisableScsi'" 'Poweroff host SCSI switch'
+Require-CloakPattern $hostScriptContent 'VBoxInternal/Cloak/StorageLabScsiEnabled' 'SCSI host ExtraData switch'
+Add-CloakRow 'SCSI_STANDARD_INQUIRY_MATERIALIZER' 'WIRED_LAB_OPTIN' 'ConsoleImplConfigCloak.cpp;DrvSCSI.cpp' 'Virtual SCSI/SAS/VirtioSCSI/USB MSD Standard INQUIRY; no capability spoofing'
+Add-CloakRow 'SCSI_SBC_VPD_IDENTITY_MATERIALIZER' 'WIRED_LAB_OPTIN' 'ConsoleImplConfigCloak.cpp;DrvSCSI.cpp;Storage/VSCSI' 'SBC HDD VPD 0x80 serial plus VPD 0x83 T10 vendor designator from root-medium-stable synthetic serial'
+
 foreach ($relative in @(
-    'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp',
     'src/VBox/Devices/Storage/VSCSI/VSCSILunMmc.cpp',
     'src/VBox/Devices/Storage/DrvHostDVD.cpp',
     'src/VBox/Devices/Storage/UsbMsd.cpp'
 )) {
     $null=Load-CloakSource $relative
 }
-Add-CloakRow 'VSCSI_USB_HOSTDVD_MATERIALIZER' 'NOT_WIRED_LAB' 'Storage/VSCSI;DrvHostDVD.cpp;UsbMsd.cpp' 'Backends exist; not provisioned by ATA HDD lab hook'
+Add-CloakRow 'SCSI_MMC_VPD83_HOSTDVD_RESIDUAL' 'NOT_WIRED_LAB' 'VSCSILunMmc.cpp;DrvHostDVD.cpp' 'SBC HDD VPD identity is wired; MMC/DVD page 0x83 semantics and physical HostDVD identity remain residual'
 Add-CloakRow 'GENERAL_FIRMWARE_PCI_HOOKS' 'OUT_OF_SCOPE_FOR_THIS_GATE' 'doc/cloak-plan/CLOAK-PLAN.md' 'Requires independent source/runtime verification before any build'
 
 $report=[pscustomobject][ordered]@{

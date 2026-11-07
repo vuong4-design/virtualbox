@@ -710,6 +710,23 @@ DECLINLINE(int) vscsiLunQueryInqStrings(PVSCSILUNINT pVScsiLun, const char **pps
 }
 
 /**
+ * Wrapper for the optional stable unit serial number callback used by SBC VPD.
+ *
+ * @returns VBox status code.
+ * @retval  VERR_NOT_FOUND if no unit serial is available.
+ * @param   pVScsiLun         The LUN.
+ * @param   ppszSerialNumber  Where to store the serial pointer on success.
+ */
+DECLINLINE(int) vscsiLunQuerySerialNumber(PVSCSILUNINT pVScsiLun, const char **ppszSerialNumber)
+{
+    if (pVScsiLun->pVScsiLunIoCallbacks->pfnVScsiLunQuerySerialNumber)
+        return pVScsiLun->pVScsiLunIoCallbacks->pfnVScsiLunQuerySerialNumber(pVScsiLun,
+                                                                              pVScsiLun->pvVScsiLunUser,
+                                                                              ppszSerialNumber);
+    return VERR_NOT_FOUND;
+}
+
+/**
  * Wrapper around vscsiReqSenseOkSet()
  */
 DECLINLINE(int) vscsiLunReqSenseOkSet(PVSCSILUNINT pVScsiLun, PVSCSIREQINT pVScsiReq)

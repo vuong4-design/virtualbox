@@ -33,6 +33,25 @@
 
 #include <iprt/stdint.h>
 
+/** VPD unit serial number page number. */
+#define VSCSI_VPD_UNIT_SERIAL_NUMBER 0x80
+/** VPD unit serial header size. */
+#define VSCSI_VPD_UNIT_SERIAL_SIZE   4
+/** Unit serial number VPD page data. */
+#pragma pack(1)
+typedef struct VSCSIVPDPAGEUNITSERIAL
+{
+    unsigned u5PeripheralDeviceType : 5;
+    unsigned u3PeripheralQualifier  : 3;
+    unsigned u8PageCode             : 8;
+    unsigned u16PageLength          : 16;
+    uint8_t  abSerial[1];
+} VSCSIVPDPAGEUNITSERIAL;
+#pragma pack()
+AssertCompileSize(VSCSIVPDPAGEUNITSERIAL, VSCSI_VPD_UNIT_SERIAL_SIZE + 1);
+typedef VSCSIVPDPAGEUNITSERIAL *PVSCSIVPDPAGEUNITSERIAL;
+typedef const VSCSIVPDPAGEUNITSERIAL *PCVSCSIVPDPAGEUNITSERIAL;
+
 /** VPD device identification page number. */
 #define VSCSI_VPD_DEVID_NUMBER 0x83
 /** VPD device identification size. */
@@ -56,6 +75,26 @@ typedef struct VSCSIVPDPAGEDEVID
 AssertCompileSize(VSCSIVPDPAGEDEVID, VSCSI_VPD_DEVID_SIZE);
 typedef VSCSIVPDPAGEDEVID *PVSCSIVPDPAGEDEVID;
 typedef const VSCSIVPDPAGEDEVID *PCVSCSIVPDPAGEDEVID;
+
+/** SPC identification descriptor fixed header size. */
+#define VSCSI_VPD_DEVID_DESC_HDR_SIZE              4
+/** ASCII code set, protocol identifier left unspecified. */
+#define VSCSI_VPD_DEVID_CODE_SET_ASCII              UINT8_C(0x02)
+/** T10 vendor identifier designator, logical-unit association. */
+#define VSCSI_VPD_DEVID_IDENTIFIER_TYPE_T10_VENDOR  UINT8_C(0x01)
+#pragma pack(1)
+typedef struct VSCSIVPDDEVIDDESC
+{
+    uint8_t u8ProtocolAndCodeSet;
+    uint8_t u8PivAssociationAndType;
+    uint8_t u8Reserved;
+    uint8_t cbIdentifier;
+    uint8_t abIdentifier[1];
+} VSCSIVPDDEVIDDESC;
+#pragma pack()
+AssertCompileSize(VSCSIVPDDEVIDDESC, VSCSI_VPD_DEVID_DESC_HDR_SIZE + 1);
+typedef VSCSIVPDDEVIDDESC *PVSCSIVPDDEVIDDESC;
+typedef const VSCSIVPDDEVIDDESC *PCVSCSIVPDDEVIDDESC;
 
 /** VPD supported VPD pages page number. */
 #define VSCSI_VPD_SUPPORTED_PAGES_NUMBER 0x00

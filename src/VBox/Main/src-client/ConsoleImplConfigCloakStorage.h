@@ -36,6 +36,18 @@ typedef struct CLOAKSTORAGEOPTICALIDENTITY
 } CLOAKSTORAGEOPTICALIDENTITY;
 typedef const CLOAKSTORAGEOPTICALIDENTITY *PCCLOAKSTORAGEOPTICALIDENTITY;
 
+/** Synthetic generic-SCSI identity.  The optional serial is only consumed by
+ * SBC hard disks to populate VPD 0x80 and a T10 vendor designator in VPD 0x83;
+ * it does not alter capability pages or MMC/DVD VPD behavior. */
+typedef struct CLOAKSTORAGESCSIIDENTITY
+{
+    const char *pszVendor;
+    const char *pszProduct;
+    const char *pszRevision;
+    const char *pszSerial;
+} CLOAKSTORAGESCSIIDENTITY;
+typedef const CLOAKSTORAGESCSIIDENTITY *PCCLOAKSTORAGESCSIIDENTITY;
+
 /**
  * Maps a real storage attachment to the child of a controller's Config node.
  * The controller instance is supplied separately by the Console's COM graph.
@@ -192,6 +204,99 @@ DECLINLINE(int) CloakStorageMaterializeOptical(PCCLOAKCFGMVTABLE pCfgm, void *pS
     if (RT_SUCCESS(rc) && fIde)
         rc = CloakCfgmMaterializeInteger(pCfgm, pSlot, "OverwriteInquiry", 1);
     return rc;
+}
+
+/** Materialize an explicit Standard INQUIRY override into the Config node of
+ * the generic SCSI driver.  Existing ExtraData values win and are validated
+ * separately, matching the ATA/ATAPI materializer policy. */
+DECLINLINE(int) CloakStorageMaterializeScsi(PCCLOAKCFGMVTABLE pCfgm, void *pScsiCfg,
+                                            PCCLOAKSTORAGESCSIIDENTITY pIdentity)
+{
+    if (!pCfgm || !pScsiCfg || !pIdentity
+        || !pIdentity->pszVendor || !*pIdentity->pszVendor
+        || !pIdentity->pszProduct || !*pIdentity->pszProduct
+        || !pIdentity->pszRevision || !*pIdentity->pszRevision
+        || strlen(pIdentity->pszVendor) > 8
+        || strlen(pIdentity->pszProduct) > 16
+        || strlen(pIdentity->pszRevision) > 4
+        || (pIdentity->pszSerial && (!*pIdentity->pszSerial || strlen(pIdentity->pszSerial) > 20)))
+        return VERR_INVALID_PARAMETER;
+
+    int rc = CloakCfgmMaterializeString(pCfgm, pScsiCfg, "InquiryVendorId", pIdentity->pszVendor);
+    if (RT_SUCCESS(rc))
+        rc = CloakCfgmMaterializeString(pCfgm, pScsiCfg, "InquiryProductId", pIdentity->pszProduct);
+    if (RT_SUCCESS(rc))
+        rc = CloakCfgmMaterializeString(pCfgm, pScsiCfg, "InquiryRevision", pIdentity->pszRevision);
+    if (RT_SUCCESS(rc) && pIdentity->pszSerial)
+        rc = CloakCfgmMaterializeString(pCfgm, pScsiCfg, "InquirySerialNumber", pIdentity->pszSerial);
+    return rc;
+}
+
+/** Fail closed if user overlay leaves the enabled SCSI lab with a partial or
+ * different Standard INQUIRY identity. */
+DECLINLINE(int) CloakStorageValidateLabScsiEffective(PCCLOAKCFGMVTABLE pCfgm, void *pScsiCfg,
+                                                     PCCLOAKSTORAGESCSIIDENTITY pIdentity)
+{
+    if (!pCfgm || !pCfgm->pfnQueryString || !pScsiCfg || !pIdentity)
+        return VERR_INVALID_PARAMETER;
+
+    struct
+    {
+        const char *pszKey;
+        const char *pszExpected;
+        size_t cchMax;
+    } const aFields[] =
+    {
+        { "InquiryVendorId", pIdentity->pszVendor, 8 },
+        { "InquiryProductId", pIdentity->pszProduct, 16 },
+        { "InquiryRevision", pIdentity->pszRevision, 4 }
+    };
+    for (size_t i = 0; i < RT_ELEMENTS(aFields); ++i)
+    {
+        if (!aFields[i].pszExpected || !*aFields[i].pszExpected)
+            return VERR_INVALID_PARAMETER;
+        int rc = CloakCfgmValidateEffectiveString(pCfgm, pScsiCfg, aFields[i].pszKey,
+                                                  aFields[i].cchMax, true);
+        if (RT_FAILURE(rc))
+            return rc;
+        char szValue[32] = {};
+        rc = pCfgm->pfnQueryString(pCfgm->pvUser, pScsiCfg, aFields[i].pszKey,
+                                   szValue, sizeof(szValue));
+        if (RT_SUCCESS(rc) && RTStrCmp(szValue, aFields[i].pszExpected))
+            rc = VERR_MISMATCH;
+        RTMemWipeThoroughly(szValue, sizeof(szValue), 3);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+    if (pIdentity->pszSerial)
+    {
+        if (!*pIdentity->pszSerial || strlen(pIdentity->pszSerial) > 20)
+            return VERR_INVALID_PARAMETER;
+        int rc = CloakCfgmValidateEffectiveString(pCfgm, pScsiCfg, "InquirySerialNumber", 20, true);
+        if (RT_FAILURE(rc))
+            return rc;
+        char szSerial[32] = {};
+        rc = pCfgm->pfnQueryString(pCfgm->pvUser, pScsiCfg, "InquirySerialNumber", szSerial, sizeof(szSerial));
+        if (RT_SUCCESS(rc) && RTStrCmp(szSerial, pIdentity->pszSerial))
+            rc = VERR_MISMATCH;
+        RTMemWipeThoroughly(szSerial, sizeof(szSerial), 3);
+        if (RT_FAILURE(rc))
+            return rc;
+    }
+    return VINF_SUCCESS;
+}
+
+/** Generic coverage guard for an independently opt-in SCSI lab surface. */
+DECLINLINE(int) CloakStorageValidateLabScsiCoverage(bool fEnabled, unsigned cPresent,
+                                                    unsigned cEligible, unsigned cMaterialized)
+{
+    if (!fEnabled)
+        return VINF_SUCCESS;
+    if (!cPresent)
+        return VERR_NOT_FOUND;
+    if (cPresent != cEligible || cEligible != cMaterialized)
+        return VERR_MISMATCH;
+    return VINF_SUCCESS;
 }
 
 /**

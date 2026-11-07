@@ -292,6 +292,18 @@ typedef struct VSCSILUNIOCALLBACKS
     DECLR3CALLBACKMEMBER(int, pfnVScsiLunQueryInqStrings, (VSCSILUN hVScsiLun, void *pvScsiLunUser, const char **ppszVendorId,
                                                            const char **ppszProductId, const char **ppszProductLevel));
 
+    /**
+     * Queries an optional stable unit serial number for SBC VPD pages.
+     *
+     * @returns VBox status code.
+     * @retval  VERR_NOT_FOUND if no serial override is available.
+     * @param   hVScsiLun         Virtual SCSI LUN handle.
+     * @param   pvScsiLunUser     Opaque user data identifying the medium.
+     * @param   ppszSerialNumber  Where to store the serial string pointer on success.
+     */
+    DECLR3CALLBACKMEMBER(int, pfnVScsiLunQuerySerialNumber, (VSCSILUN hVScsiLun, void *pvScsiLunUser,
+                                                             const char **ppszSerialNumber));
+
 } VSCSILUNIOCALLBACKS;
 /** Pointer to a virtual SCSI LUN I/O callback table. */
 typedef VSCSILUNIOCALLBACKS *PVSCSILUNIOCALLBACKS;

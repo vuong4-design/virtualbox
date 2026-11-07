@@ -15,6 +15,10 @@ $paths=@(
     'src/VBox/Main/testcase/tstCloakConfig.cpp',
     'src/VBox/Devices/Storage/DevATA.cpp',
     'src/VBox/Devices/Storage/DevAHCI.cpp',
+    'src/VBox/Devices/Storage/DrvSCSI.cpp',
+    'include/VBox/vscsi.h',
+    'src/VBox/Devices/Storage/VSCSI/VSCSIInternal.h',
+    'src/VBox/Devices/Storage/VSCSI/VSCSIVpdPages.h',
     'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp',
     'src/VBox/Devices/Storage/VSCSI/VSCSILunMmc.cpp',
     'src/VBox/Devices/Storage/DrvHostDVD.cpp',
@@ -36,7 +40,13 @@ try {
     if (@($report.Hooks | Where-Object { $_.Id -eq 'ATAPI_PROFILE_MATERIALIZER' -and $_.Status -eq 'WIRED_LAB_OPTIN' }).Count -ne 1) {
         throw 'Expected the separate opt-in IDE/AHCI optical hook'
     }
-    Write-Host 'PASS: source-only lab hook contract detects five HDD points plus the optical opt-in'
+    if (@($report.Hooks | Where-Object { $_.Id -eq 'SCSI_STANDARD_INQUIRY_MATERIALIZER' -and $_.Status -eq 'WIRED_LAB_OPTIN' }).Count -ne 1) {
+        throw 'Expected the separate opt-in generic SCSI Standard INQUIRY hook'
+    }
+    if (@($report.Hooks | Where-Object { $_.Id -eq 'SCSI_SBC_VPD_IDENTITY_MATERIALIZER' -and $_.Status -eq 'WIRED_LAB_OPTIN' }).Count -ne 1) {
+        throw 'Expected SBC VPD 0x80/0x83 identity hook'
+    }
+    Write-Host 'PASS: source-only lab hook contract detects five HDD points plus optical, SCSI INQUIRY and SBC VPD opt-ins'
 
     $console=Join-Path $root $paths[0]
     $original=[IO.File]::ReadAllText($console)
@@ -82,6 +92,31 @@ try {
     }
     if(-not $rejected){throw 'Missing host passthrough guard was not rejected'}
     Write-Host 'PASS: missing host optical/passthrough safety gate rejected'
+
+    [IO.File]::WriteAllText($console,$original,[Text.Encoding]::UTF8)
+    $broken=$original.Replace('CloakStorageValidateLabScsiCoverage(fLabScsiEnabled, cScsiPresent,',
+                              'CloakStorageValidateLabScsiCoverage(false, cScsiPresent,')
+    if($broken -ceq $original){throw 'Could not inject SCSI coverage negative fixture'}
+    [IO.File]::WriteAllText($console,$broken,[Text.Encoding]::UTF8)
+    $rejected=$false
+    try {& $gate -SourceRoot $root|Out-Null} catch {
+        $rejected=$_.Exception.Message -match 'SCSI coverage gate in live path'
+    }
+    if(-not $rejected){throw 'Missing SCSI coverage gate was not rejected'}
+    Write-Host 'PASS: missing SCSI coverage hook rejected'
+
+    [IO.File]::WriteAllText($console,$original,[Text.Encoding]::UTF8)
+    $sbc=Join-Path $root 'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp'
+    $sbcOriginal=[IO.File]::ReadAllText($sbc)
+    $sbcBroken=$sbcOriginal.Replace('VSCSI_VPD_DEVID_IDENTIFIER_TYPE_T10_VENDOR','0')
+    if($sbcBroken -ceq $sbcOriginal){throw 'Could not inject VPD83 designator negative fixture'}
+    [IO.File]::WriteAllText($sbc,$sbcBroken,[Text.Encoding]::UTF8)
+    $rejected=$false
+    try {& $gate -SourceRoot $root|Out-Null} catch {
+        $rejected=$_.Exception.Message -match 'SBC VPD 0x83 T10 designator materialization'
+    }
+    if(-not $rejected){throw 'Missing SBC VPD83 designator wiring was not rejected'}
+    Write-Host 'PASS: missing SBC VPD83 designator hook rejected'
 }
 finally {
     if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}
