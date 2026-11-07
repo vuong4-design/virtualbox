@@ -319,15 +319,33 @@ function Test-CloakStorageC5 {
         $pnp = [string](Get-C5Field $optical 'PnpVendorProduct')
         $pnVendor = Get-C5PnpPart $pnp 'VEN'
         $pnProduct = Get-C5PnpPart $pnp 'PROD'
-        # This lab profile applies to ATA disks, not optical drives.
-        # An internally consistent VBOX CD-ROM is a known scope residual.
-        if ($pnVendor -eq 'VBOX') {
-            $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE' 'Optical VBOX identity is an expected out-of-scope lab residual'))
-        } else {
-            $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE' 'Lab ATA profile does not provision optical identity'))
-        }
         $desc = Get-C5Field $optical 'WindowsQuery'
         $inq = Get-C5Field $optical 'RawInquiry'
+        # Optical lab is separately opt-in and must present a coherent
+        # synthetic LAB/CD-ROM/LAB1 identity in all three guest layers.
+        # An unmodified VBOX optical remains a documented, valid residual.
+        if ($pnVendor -eq 'LAB') {
+            $labInqVendor = (Get-C5Text (Get-C5Field $inq 'Vendor')).ToUpperInvariant()
+            $labInqProduct = (Get-C5Text (Get-C5Field $inq 'Product')).ToUpperInvariant()
+            $labInqRevision = (Get-C5Text (Get-C5Field $inq 'Revision')).ToUpperInvariant()
+            $labOsVendor = (Get-C5Text (Get-C5Field $desc 'Vendor')).ToUpperInvariant()
+            $labOsProduct = (Get-C5Text (Get-C5Field $desc 'Product')).ToUpperInvariant()
+            $labOsRevision = (Get-C5Text (Get-C5Field $desc 'Revision')).ToUpperInvariant()
+            if ($pnProduct -ne 'CD-ROM') {
+                $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'FAIL' 'Unexpected PnP product for synthetic LAB optical profile'))
+            } elseif (-not $labInqVendor -or -not $labInqProduct -or -not $labInqRevision -or -not $labOsVendor -or -not $labOsProduct -or -not $labOsRevision) {
+                $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'NOT_VERIFIED' 'LAB optical PnP present, but direct INQUIRY or Windows descriptor incomplete'))
+            } elseif ($labInqVendor -ne 'LAB' -or $labInqProduct -ne 'CD-ROM' -or $labInqRevision -ne 'LAB1' -or
+                    $labOsVendor -ne 'LAB' -or $labOsProduct -ne 'CD-ROM' -or $labOsRevision -ne 'LAB1') {
+                $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'FAIL' 'LAB optical identity conflicts with the synthetic lab optical contract'))
+            } else {
+                $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'PASS' 'Synthetic LAB optical profile matches PnP, OS descriptor and direct INQUIRY'))
+            }
+        } elseif ($pnVendor -eq 'VBOX') {
+            $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE' 'Unmodified VBOX CD-ROM remains outside opt-in optical lab profile'))
+        } else {
+            $checks.Add((New-C5Check $slot 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE' 'Optical identity does not claim the synthetic LAB profile'))
+        }
         $descVen = (Get-C5Text (Get-C5Field $desc 'Vendor')).ToUpperInvariant()
         $descProd = (Get-C5Text (Get-C5Field $desc 'Product')).ToUpperInvariant()
         $descRev = Get-C5Text (Get-C5Field $desc 'Revision')
@@ -500,6 +518,6 @@ function Compare-CloakStorageS3Evidence {
 }
 
 function Get-CloakStorageC5Contract {
-    return [pscustomobject]@{ Release='S3-C5-2026-11-B3'; SchemaVersion=1; CapabilityChecks='S3-C5-B3' }
+    return [pscustomobject]@{ Release='S3-C5-2026-11-B4'; SchemaVersion=1; CapabilityChecks='S3-C5-B4' }
 }
 Export-ModuleMember -Function Test-CloakStorageC5,Compare-CloakStorageS3Evidence,Get-CloakStorageC5Contract

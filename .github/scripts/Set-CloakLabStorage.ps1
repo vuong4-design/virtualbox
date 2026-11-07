@@ -8,7 +8,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
-    [ValidateSet('Status','Enable','Disable','EnableRootSerial','DisableRootSerial')]
+    [ValidateSet('Status','Enable','Disable','EnableRootSerial','DisableRootSerial','EnableOptical','DisableOptical')]
     [string]$Action = 'Status',
     [ValidateNotNullOrEmpty()]
     [string]$VM = 'test',
@@ -36,10 +36,12 @@ $state = [regex]::Match([string]$stateLine[0], '^VMState="([^"]+)"$').Groups[1].
 
 $key = if ($Action -in @('EnableRootSerial','DisableRootSerial')) {
     'VBoxInternal/Cloak/StorageLabRootSerialEnabled'
+} elseif ($Action -in @('EnableOptical','DisableOptical')) {
+    'VBoxInternal/Cloak/StorageLabOpticalEnabled'
 } else { 'VBoxInternal/Cloak/StorageLabEnabled' }
 if ($Action -ne 'Status') {
     if ($state -ne 'poweroff') { throw "Shut down VM completely before modifying Storage Identity (current: $state)" }
-    if ($Action -in @('Enable','EnableRootSerial')) {
+    if ($Action -in @('Enable','EnableRootSerial','EnableOptical')) {
         $enabled = Get-ExtraData 'VBoxInternal/Cloak/Enabled'
         $profile = Get-ExtraData 'VBoxInternal/Cloak/Profile'
         if ($enabled -notin @('integer:1','1') -or $profile -notin @('lab-dmi-v1','string:lab-dmi-v1')) {
@@ -53,13 +55,16 @@ if ($Action -ne 'Status') {
         }
     }
     if ($PSCmdlet.ShouldProcess($VM, "$Action lab storage identity")) {
-        $value = if ($Action -in @('Enable','EnableRootSerial')) { 'integer:1' } else { 'integer:0' }
+        $value = if ($Action -in @('Enable','EnableRootSerial','EnableOptical')) { 'integer:1' } else { 'integer:0' }
         & $VBoxManage setextradata $VM $key $value
         if ($LASTEXITCODE -ne 0) { throw 'setextradata failed' }
         if ($Action -eq 'Disable') {
             # A future Enable must not silently reactivate a previous S2 mode.
             & $VBoxManage setextradata $VM 'VBoxInternal/Cloak/StorageLabRootSerialEnabled' 'integer:0'
             if ($LASTEXITCODE -ne 0) { throw 'Failed to disable root-medium serial mode' }
+            # Global storage-disable must clear the separate optical opt-in.
+            & $VBoxManage setextradata $VM 'VBoxInternal/Cloak/StorageLabOpticalEnabled' 'integer:0'
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to disable lab optical identity' }
         }
     }
 }
@@ -67,6 +72,9 @@ if ($Action -ne 'Status') {
 Write-Host "VM: $VM (power state: $state)"
 $current = Get-ExtraData 'VBoxInternal/Cloak/StorageLabEnabled'
 $root = Get-ExtraData 'VBoxInternal/Cloak/StorageLabRootSerialEnabled'
+$optical = Get-ExtraData 'VBoxInternal/Cloak/StorageLabOpticalEnabled'
 Write-Host ("StorageLabEnabled: " + $(if ($current) { $current } else { '<not set> (OFF)' }))
 Write-Host ("StorageLabRootSerialEnabled: " + $(if ($root) { $root } else { '<not set> (OFF)' }))
+Write-Host ("StorageLabOpticalEnabled: " + $(if ($optical) { $optical } else { '<not set> (OFF)' }))
+Write-Host 'Optical lab requires a virtual IDE/AHCI DVD; host-drive and passthrough optical are rejected at startup.'
 Write-Host 'Changes take effect on cold boot only. No seeds or disk serials were printed.'

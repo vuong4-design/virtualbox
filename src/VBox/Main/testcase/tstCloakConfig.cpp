@@ -1185,6 +1185,88 @@ static void testStorageLabMaterialization(RTTEST hTest)
     testCfgmDestroy(&Cfgm);
 }
 
+static void testStorageLabOpticalMaterialization(RTTEST hTest)
+{
+    RTTestSub(hTest, "Opt-in synthetic optical identity: IDE and AHCI, pass-through guards");
+    char szAhci[21], szAgain[21], szIde[21], szOtherVm[21];
+    uint64_t const u64Stream = UINT64_C(0x0123456789abcdef);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream, "ahci", 0, "Port1",
+                                                szAhci, sizeof(szAhci)), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream, "ahci", 0, "Port1",
+                                                szAgain, sizeof(szAgain)), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(szAhci, szAgain));
+    RTTESTI_CHECK(strlen(szAhci) == 18);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream, "piix3ide", 0, "SecondaryMaster",
+                                                szIde, sizeof(szIde)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szAhci, szIde) != 0);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream + 1, "ahci", 0, "Port1",
+                                                szOtherVm, sizeof(szOtherVm)), VINF_SUCCESS);
+    RTTESTI_CHECK(RTStrCmp(szAhci, szOtherVm) != 0);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream, NULL, 0, "Port1",
+                                                szAgain, sizeof(szAgain)), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageLabOpticalSerial(u64Stream, "ahci", 0, "Port1",
+                                                szAgain, 5), VERR_INVALID_PARAMETER);
+
+    TESTCFGM Cfgm = {};
+    TESTCFGMNODE *pAhci = testCfgmAddNode(&Cfgm, "Devices/ahci/0/Config/Port1");
+    TESTCFGMNODE *pIde = testCfgmAddNode(&Cfgm, "Devices/piix3ide/0/Config/SecondaryMaster");
+    CLOAKCFGMVTABLE VTable = testCfgmMakeVTable(&Cfgm);
+    CLOAKSTORAGEOPTICALIDENTITY OpticalAhci = { "LAB CD-ROM", "LAB1", szAhci, "LAB", "CD-ROM", "LAB1" };
+    CLOAKSTORAGEOPTICALIDENTITY OpticalIde = { "LAB CD-ROM", "LAB1", szIde, "LAB", "CD-ROM", "LAB1" };
+
+    RTTESTI_CHECK_RC(CloakStorageMaterializeOptical(&VTable, pAhci, &OpticalAhci, false), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VINF_SUCCESS);
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pAhci, "ATAPIVendorId"), "LAB"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pAhci, "ATAPIProductId"), "CD-ROM"));
+    RTTESTI_CHECK(!RTStrCmp(testCfgmGetString(pAhci, "ATAPIRevision"), "LAB1"));
+    RTTESTI_CHECK(!testCfgmFindValue(pAhci, "OverwriteInquiry")); /* AHCI has no such key */
+
+    RTTESTI_CHECK_RC(CloakStorageMaterializeOptical(&VTable, pIde, &OpticalIde, true), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pIde, &OpticalIde, true), VINF_SUCCESS);
+    RTTESTI_CHECK(testCfgmGetInteger(pIde, "OverwriteInquiry", 0) == 1);
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pIde, "OverwriteInquiry", 0), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pIde, &OpticalIde, true), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetInteger(pIde, "OverwriteInquiry", 1), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pIde, &OpticalIde, true), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIVendorId", "OTHER"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageMaterializeOptical(&VTable, pAhci, &OpticalAhci, false), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIVendorId", "LAB"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIProductId", "OTHER"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIProductId", "CD-ROM"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIRevision", "BAD"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIRevision", "LONGER"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ATAPIRevision", "LAB1"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VINF_SUCCESS);
+
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ModelNumber", "OTHER CD-ROM"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "ModelNumber", "LAB CD-ROM"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "FirmwareRevision", "WRONG"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "FirmwareRevision", "LAB1"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "SerialNumber", "LO00000000000000"), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(testCfgmSetString(pAhci, "SerialNumber", szAhci), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalEffective(&VTable, pAhci, &OpticalAhci, false), VINF_SUCCESS);
+
+    CLOAKSTORAGEOPTICALIDENTITY Invalid = OpticalAhci;
+    Invalid.pszVendor = "TOO-LONG-VENDOR";
+    RTTESTI_CHECK_RC(CloakStorageMaterializeOptical(&VTable, pAhci, &Invalid, false), VERR_INVALID_PARAMETER);
+    RTTESTI_CHECK_RC(CloakStorageMaterializeOptical(&VTable, pAhci, NULL, false), VERR_INVALID_PARAMETER);
+
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalCoverage(false, 0, 0, 0), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalCoverage(true, 0, 0, 0), VERR_NOT_FOUND);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalCoverage(true, 2, 2, 2), VINF_SUCCESS);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalCoverage(true, 2, 1, 1), VERR_MISMATCH);
+    RTTESTI_CHECK_RC(CloakStorageValidateLabOpticalCoverage(true, 2, 2, 1), VERR_MISMATCH);
+    testCfgmDestroy(&Cfgm);
+}
+
 static void testProfileClassNames(RTTEST hTest)
 {
     RTTestSub(hTest, "Profile class names");
@@ -1216,6 +1298,7 @@ int main()
         testProfileMaterializationFields(hTest);
         testCfgmMaterialization(hTest);
         testStorageLabMaterialization(hTest);
+        testStorageLabOpticalMaterialization(hTest);
         testProfileClassNames(hTest);
 
         rcExit = RTTestSummaryAndDestroy(hTest);

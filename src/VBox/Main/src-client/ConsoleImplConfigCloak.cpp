@@ -534,6 +534,17 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
         else if (RT_FAILURE(vrc))
             return vrc;
     }
+    /* ATAPI has a separate lab-only opt-in. Existing optical descriptors stay
+     * untouched on new host builds unless explicitly enabled. */
+    bool fLabOpticalEnabled = false;
+    if (fLabProfile)
+    {
+        vrc = cloakQueryBool(mpVMM, pCloak, "StorageLabOpticalEnabled", &fLabOpticalEnabled);
+        if (vrc == VERR_CFGM_VALUE_NOT_FOUND)
+            fLabOpticalEnabled = false;
+        else if (RT_FAILURE(vrc))
+            return vrc;
+    }
     /* S0/S1 lab: enumerate actual attached media, not guessed guest bus IDs. */
     if (fLabProfile && pProfile->pszAtaModel)
     {
@@ -543,6 +554,7 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
             return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
 
         unsigned cApplied = 0, cEligible = 0, cUnsupported = 0, cOptical = 0;
+        unsigned cOpticalEligible = 0, cOpticalApplied = 0;
         for (size_t i = 0; i < Controllers.size(); ++i)
         {
             StorageControllerType_T enmCtrl;
@@ -574,7 +586,81 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
                     return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
                 if (enmType == DeviceType_DVD)
                 {
-                    cOptical++; /* Inventory only; optical is out of HDD lab profile scope. */
+                    cOptical++;
+                    if (!fLabOpticalEnabled)
+                        continue; /* Existing optical identity remains unchanged. */
+                    if (!fSupported)
+                        continue; /* Counted but not eligible: coverage guard rejects mixed buses. */
+
+                    ComPtr<IMedium> pOpticalMedium;
+                    hrc = Attachments[j]->COMGETTER(Medium)(pOpticalMedium.asOutParam());
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    BOOL fHostDrive = FALSE;
+                    if (!pOpticalMedium.isNull())
+                    {
+                        hrc = pOpticalMedium->COMGETTER(HostDrive)(&fHostDrive);
+                        if (FAILED(hrc))
+                            return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    }
+                    BOOL fPassThrough = FALSE;
+                    hrc = Attachments[j]->COMGETTER(Passthrough)(&fPassThrough);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    if (fHostDrive || fPassThrough)
+                        continue; /* Do not alter identity of a host physical drive. */
+
+                    cOpticalEligible++;
+                    LONG iOpticalPort = -1, iOpticalDevice = -1;
+                    hrc = Attachments[j]->COMGETTER(Port)(&iOpticalPort);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    hrc = Attachments[j]->COMGETTER(Device)(&iOpticalDevice);
+                    if (FAILED(hrc))
+                        return VERR_MAIN_CONFIG_CONSTRUCTOR_COM_ERROR;
+                    char szOpticalSlot[32];
+                    vrc = CloakStorageGetSlot(pszDevice, iOpticalPort, iOpticalDevice,
+                                             szOpticalSlot, sizeof(szOpticalSlot));
+                    if (RT_FAILURE(vrc))
+                        return vrc;
+                    PCFGMNODE pOpticalController = mpVMM->pfnCFGMR3GetChildF(pRoot,
+                                                    "Devices/%s/%u/Config", pszDevice, uInstance);
+                    if (!pOpticalController)
+                        return VERR_NOT_FOUND;
+                    PCFGMNODE pOpticalSlot = mpVMM->pfnCFGMR3GetChild(pOpticalController, szOpticalSlot);
+                    if (!pOpticalSlot)
+                    {
+                        vrc = mpVMM->pfnCFGMR3InsertNode(pOpticalController, szOpticalSlot,
+                                                        &pOpticalSlot);
+                        if (RT_FAILURE(vrc))
+                            return vrc;
+                    }
+
+                    char szOpticalSerial[21];
+                    vrc = CloakStorageLabOpticalSerial(u64Serial, pszDevice, uInstance,
+                                                      szOpticalSlot, szOpticalSerial,
+                                                      sizeof(szOpticalSerial));
+                    if (RT_FAILURE(vrc))
+                        return vrc;
+                    CLOAKSTORAGEOPTICALIDENTITY Optical =
+                    {
+                        "LAB CD-ROM", "LAB1", szOpticalSerial, "LAB", "CD-ROM", "LAB1"
+                    };
+                    bool const fIde = !RTStrCmp(pszDevice, "piix3ide");
+                    vrc = CloakStorageMaterializeOptical(&Cfgm, pOpticalSlot, &Optical, fIde);
+                    if (RT_SUCCESS(vrc))
+                        vrc = CloakStorageValidateLabOpticalEffective(&Cfgm, pOpticalSlot,
+                                                                     &Optical, fIde);
+                    RTMemWipeThoroughly(szOpticalSerial, sizeof(szOpticalSerial), 3);
+                    if (RT_FAILURE(vrc))
+                    {
+                        LogRel(("Cloak: invalid synthetic optical lab CFGM at %s/%u/%s, vrc=%Rrc\n",
+                                pszDevice, uInstance, szOpticalSlot, vrc));
+                        return vrc;
+                    }
+                    cOpticalApplied++;
+                    LogRel(("Cloak: synthetic optical lab identity at %s/%u/%s materialized (serial redacted)\n",
+                            pszDevice, uInstance, szOpticalSlot));
                     continue;
                 }
                 if (enmType != DeviceType_HardDisk)
@@ -670,14 +756,19 @@ int Console::i_configCloak(PCFGMNODE pRoot, IVirtualBox *pVirtualBox, IMachine *
             }
         }
         vrc = CloakStorageValidateLabCoverage(fLabStorageEnabled, cEligible, cApplied);
+        if (RT_SUCCESS(vrc))
+            vrc = CloakStorageValidateLabOpticalCoverage(fLabOpticalEnabled, cOptical,
+                                                         cOpticalEligible, cOpticalApplied);
         if (RT_FAILURE(vrc))
         {
-            LogRel(("Cloak: lab storage requested but no complete eligible HDD mapping exists, vrc=%Rrc\n", vrc));
+            LogRel(("Cloak: lab storage/optical coverage incomplete or unsupported, vrc=%Rrc\n", vrc));
             return vrc;
         }
         LogRel(("Cloak: lab storage inventory: %u eligible ATA/AHCI HDD(s), %u unsupported HDD(s), "
-                "%u optical attachment(s) outside HDD lab scope, %u materialized; StorageLabEnabled=%RTbool\n",
-                cEligible, cUnsupported, cOptical, cApplied, fLabStorageEnabled));
+                "%u optical attachment(s) (%u eligible, %u materialized), %u HDD materialized; "
+                "StorageLabEnabled=%RTbool, StorageLabOpticalEnabled=%RTbool\n",
+                cEligible, cUnsupported, cOptical, cOpticalEligible, cOpticalApplied,
+                cApplied, fLabStorageEnabled, fLabOpticalEnabled));
     }
 
     try
