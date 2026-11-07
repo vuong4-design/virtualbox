@@ -18,7 +18,8 @@ $paths=@(
     'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp',
     'src/VBox/Devices/Storage/VSCSI/VSCSILunMmc.cpp',
     'src/VBox/Devices/Storage/DrvHostDVD.cpp',
-    'src/VBox/Devices/Storage/UsbMsd.cpp'
+    'src/VBox/Devices/Storage/UsbMsd.cpp',
+    '.github/scripts/Set-CloakLabStorage.ps1'
 )
 try {
     foreach($p in $paths) {
@@ -32,7 +33,10 @@ try {
     if(@($report.Hooks|Where-Object {$_.Status -eq 'WIRED_LAB'}).Count -ne 5) {
         throw 'Expected five implemented lab hook contracts'
     }
-    Write-Host 'PASS: source-only lab hook contract detects five wired points'
+    if (@($report.Hooks | Where-Object { $_.Id -eq 'ATAPI_PROFILE_MATERIALIZER' -and $_.Status -eq 'WIRED_LAB_OPTIN' }).Count -ne 1) {
+        throw 'Expected the separate opt-in IDE/AHCI optical hook'
+    }
+    Write-Host 'PASS: source-only lab hook contract detects five HDD points plus the optical opt-in'
 
     $console=Join-Path $root $paths[0]
     $original=[IO.File]::ReadAllText($console)
@@ -57,6 +61,27 @@ try {
     }
     if(-not $rejected){throw 'Missing eligible-drive gate was not rejected'}
     Write-Host 'PASS: missing eligible-drive coverage hook fails static gate'
+
+    $broken=$original.Replace('vrc = CloakStorageValidateLabOpticalEffective(&Cfgm, pOpticalSlot,',
+                              'vrc = CloakStorageValidateLabEffective(&Cfgm, pOpticalSlot,')
+    if($broken -ceq $original){throw 'Could not inject negative optical validator fixture'}
+    [IO.File]::WriteAllText($console,$broken,[Text.Encoding]::UTF8)
+    $rejected=$false
+    try {& $gate -SourceRoot $root|Out-Null} catch {
+        $rejected=$_.Exception.Message -match 'Optical identity must be validated after materialization'
+    }
+    if(-not $rejected){throw 'Missing exact optical identity gate was not rejected'}
+    Write-Host 'PASS: missing optical effective identity gate rejected'
+
+    $broken=$original.Replace('if (fHostDrive || fPassThrough)','if (false)')
+    if($broken -ceq $original){throw 'Could not inject host-drive safety negative fixture'}
+    [IO.File]::WriteAllText($console,$broken,[Text.Encoding]::UTF8)
+    $rejected=$false
+    try {& $gate -SourceRoot $root|Out-Null} catch {
+        $rejected=$_.Exception.Message -match 'Host optical/passthrough guard'
+    }
+    if(-not $rejected){throw 'Missing host passthrough guard was not rejected'}
+    Write-Host 'PASS: missing host optical/passthrough safety gate rejected'
 }
 finally {
     if([IO.Directory]::Exists($root)){[IO.Directory]::Delete($root,$true)}

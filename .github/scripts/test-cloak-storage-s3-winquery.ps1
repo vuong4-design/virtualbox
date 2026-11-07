@@ -104,7 +104,7 @@ if ($PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows) {
     Assert-WinQuery ($null -ne $probe.QueryDiagnostics.Trim -and $null -ne $probe.QueryDiagnostics.SeekPenalty) 'Each query independently diagnosed'
     $safe = $probe | ConvertTo-Json -Depth 7
     Assert-WinQuery (-not $safe.Contains('PhysicalDrive1024') -and -not $safe.Contains('\\.\')) 'No device path in diagnostic JSON'
-    Assert-WinQuery ($null -ne ('CloakStorageS3ReadOnlyB3.DeviceProps' -as [type])) 'P/Invoke assembly compiled'
+    Assert-WinQuery ($null -ne ('CloakStorageS3ReadOnlyB4.DeviceProps' -as [type])) 'P/Invoke assembly compiled'
     Write-Host 'PASS: Windows Add-Type read-only IOCTL helper compiled'
 }
 Write-Host 'PASS: Storage S3 Windows query offline tests and B2 numeric IOCTL diagnostics'

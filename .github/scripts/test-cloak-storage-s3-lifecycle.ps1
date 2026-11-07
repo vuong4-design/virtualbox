@@ -36,12 +36,12 @@ Write-Host 'PASS: stable ATA/optical identity and host flags across lifecycle'
 # Script release can change between baseline and comparison; S3 lifecycle
 # compares fields instead of requiring byte-for-byte collector versions.
 $oldVersion = Clone-S3 $baseline
-$oldVersion | Add-Member -NotePropertyName AuditRevision -NotePropertyValue 'S3-C5-2026-11-B2'
+$oldVersion | Add-Member -NotePropertyName AuditRevision -NotePropertyValue 'S3-C5-2026-11-B3'
 $newVersion = Clone-S3 $current
-$newVersion | Add-Member -NotePropertyName AuditRevision -NotePropertyValue 'S3-C5-2026-11-B3'
+$newVersion | Add-Member -NotePropertyName AuditRevision -NotePropertyValue 'S3-C5-2026-11-B4'
 $crossVersion = Compare-CloakStorageS3Evidence -Baseline $oldVersion -Current $newVersion
-Assert-Lifecycle ($crossVersion.Overall -eq 'PASS' -and $crossVersion.Failed -eq 0) 'compatible baseline from earlier B2 release'
-Write-Host 'PASS: compatible B2-to-B3 lifecycle report comparison'
+Assert-Lifecycle ($crossVersion.Overall -eq 'PASS' -and $crossVersion.Failed -eq 0) 'compatible baseline from earlier B3 release'
+Write-Host 'PASS: compatible B3-to-B4 lifecycle report comparison'
 
 foreach ($case in @(
     @{Name='serial';Change={param($x) $x.Disks[0].SerialSha256='DIFFERENT'};Id='LIFECYCLE_SERIALSHA256'},

@@ -736,6 +736,117 @@ Do not run snapshot actions for this hook batch. Existing snapshot
 scripts remain unchanged. A future host C++ build and tstCloakConfig
 run are required before claiming the new validator works in a VM.
 
+### S3.7 — H2 IDE/AHCI optical profile hook, B4 guest audit (build pending)
+
+H2 stages a NEW, SYNTHETIC, LAB-ONLY optical identity path. It is
+**not enabled by default** and is independent of StorageLabEnabled.
+No real manufacturer identity is claimed, no VMware/VMMDev/VGA/USB/PCI
+driver-binding IDs or Guest Additions are modified.
+
+**C++ wiring:** ConsoleImplConfigCloak.cpp now enumerates true DVD
+attachments from the VM controller/medium COM graph. When
+`VBoxInternal/Cloak/StorageLabOpticalEnabled=integer:1` and only for
+virtual IDE/PIIX3 or AHCI DVD attachments (not HostDrive or passthrough),
+it uses the actual controller instance/slot CFGM node to populate
+`ModelNumber=LAB CD-ROM`, `FirmwareRevision=LAB1`,
+`ATAPIVendorId=LAB`, `ATAPIProductId=CD-ROM`,
+`ATAPIRevision=LAB1`, plus a synthetic, deterministic, redacted
+18-character serial derived from the VM serial stream and slot.
+For PIIX3 IDE only, `OverwriteInquiry=1` must also be effective.
+Any conflicting ExtraData override fails before device initialization.
+Unsupported or physical/passthrough optical mixed with a requested
+optical lab profile fails the coverage gate rather than silently
+changing only some drives. Empty DVD tray (medium not mounted) is
+permitted if its virtual optical controller attachment exists.
+
+**Known identity limit:** optical serial is keyed to controller instance
+and slot. Moving optical to another slot changes that synthetic serial.
+This is NOT the planned stable logical optical drive ID. No change
+to ATA SMART, TRIM, rotation, optical VPD83 or physical optical inquiry
+behavior is implied by this hook.
+
+**Host control:** `Set-CloakLabStorage.ps1` adds `EnableOptical` and
+`DisableOptical`. Run only when VM is fully poweroff and an existing
+enabled `lab-dmi-v1` profile is selected. Global `Disable` clears
+the optical switch too; `Enable` (HDD) does not automatically enable
+optical. With optical disabled, current VBOX/CD-ROM/1.0 remains as-is.
+
+**Guest audit:** release `S3-C5-2026-11-B4` adds C5 LAB optical scope
+assessment. It reports `OPTICAL_LAB_SCOPE=PASS` only when PnP, Windows
+descriptor and direct read-only INQUIRY all show synthetic
+`LAB/CD-ROM/LAB1`; incomplete evidence is `NOT_VERIFIED` and
+disagreement is `FAIL`. Unmodified `VBOX/CD-ROM/1.0` stays an expected
+`NOT_APPLICABLE` optical lab residual. B4 keeps HDD C5 semantics.
+Some VPD83/rotation observations may remain NOT_VERIFIED even when
+this optical identity path works.
+
+**Pre-build checks** (source/PowerShell only; cannot prove C++ compiles):
+
+~~~powershell
+cd D:\virtualbox
+.\.github\scripts\Test-CloakLabHookWiring.ps1
+.\.github\scripts\test-cloak-lab-hook-wiring.ps1
+.\.github\scripts\test-cloak-lab-optical-host.ps1
+.\.github\scripts\test-cloak-storage-s3.ps1
+~~~
+
+**After successful host build and passing native tstCloakConfig:**
+First verify your actual current VBoxManage.exe path (not old vbox2).
+Use a disposable test VM and back up its important data because
+changing optical PnP identity can re-enumerate a device in Windows.
+Ensure a virtual IDE or SATA optical attachment is present; do not
+enable this profile for HostDrive or passthrough optical.
+With the guest fully SHUT DOWN, on HOST PowerShell:
+
+~~~powershell
+cd D:\virtualbox
+$vbm='C:\path\to\current\VBoxManage.exe'  # replace with actual path
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action Status -VM test -VBoxManage $vbm
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action EnableOptical -VM test -VBoxManage $vbm -WhatIf
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action EnableOptical -VM test -VBoxManage $vbm
+& $vbm startvm test --type gui
+~~~
+
+Create/transfer B4 guest bundle from the HOST:
+
+~~~powershell
+cd D:\virtualbox
+.\.github\scripts\New-CloakStorageS3Bundle.ps1 `
+    -OutputPath "$env:USERPROFILE\Downloads\CloakStorageS3-B4.zip" -Force
+~~~
+
+Copy the B4 ZIP and existing `cloak-c5-host.json` to the guest
+`C:\Users\admin\Documents\scripts`. Guest Administrator PowerShell:
+
+~~~powershell
+cd C:\Users\admin\Documents\scripts
+Expand-Archive .\CloakStorageS3-B4.zip -DestinationPath .\S3-C5-B4 -Force
+Copy-Item .\cloak-c5-host.json .\S3-C5-B4\cloak-c5-host.json
+cd .\S3-C5-B4
+.\Test-CloakStorageS3Guest.ps1 `
+    -NativeAtaIdentify `
+    -HostCapabilitiesPath .\cloak-c5-host.json `
+    -OutputPath "$env:USERPROFILE\Documents\cloak-S3-B4-optical.json"
+~~~
+
+Acceptance requires `bundle integrity=SHA256_VERIFIED`,
+`OPTICAL_LAB_SCOPE=PASS`, `OPTICAL_OS_DESCRIPTOR=PASS`,
+`ATAPI_OPTICAL=PASS`, and no new HDD identity contradictions.
+If Windows refuses INQUIRY or VPD, record NOT_VERIFIED instead of
+claiming full storage runtime PASS. In a failure case, shut down
+the VM fully and run on HOST:
+
+~~~powershell
+.\.github\scripts\Set-CloakLabStorage.ps1 -Action DisableOptical -VM test -VBoxManage $vbm
+~~~
+
+**Deferred:** snapshot/restore runtime testing; VSCSI, USB MSD,
+HostDVD profile materializers; persistent logical drive ID; full
+SMART/TRIM/rotation capability implementations. CI runs static source
+guards and PowerShell tests BEFORE building, then native `tstCloakConfig`
+as a separate compiled test stage. Do not claim H2 runtime PASS until
+the new host build boots and the B4 guest JSON is inspected.
+
 ## Roll back safely
 
 Shut down the guest fully, then on the host:

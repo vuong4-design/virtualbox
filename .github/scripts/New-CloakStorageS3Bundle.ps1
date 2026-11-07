@@ -13,7 +13,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$release = 'S3-C5-2026-11-B3'
+$release = 'S3-C5-2026-11-B4'
 $files = @(
     'Test-CloakStorageS3Guest.ps1',
     'CloakStorageC5.psm1',

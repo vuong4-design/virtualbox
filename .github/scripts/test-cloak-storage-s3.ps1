@@ -168,7 +168,28 @@ $opticalMissing.RawInquiry = $null
 $opticalMissing.RawVpd83 = $null
 $opticalNotVerified = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($opticalMissing)
 Assert-C5 (Has-C5 $opticalNotVerified 'ATAPI_OPTICAL' 'NOT_VERIFIED') 'missing raw INQUIRY never PASS'
-Assert-C5 (Has-C5 $opticalOkay 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE') 'Optical profile explicitly out of lab scope'
+Assert-C5 (Has-C5 $opticalOkay 'OPTICAL_LAB_SCOPE' 'NOT_APPLICABLE') 'Unmodified VBOX optical remains out of lab profile'
+
+$optLab = Copy-C5 $opticalFixture
+$optLab.PnpVendorProduct = 'VEN_LAB&PROD_CD-ROM'
+$optLab.WindowsQuery.Vendor = 'LAB'
+$optLab.WindowsQuery.Revision = 'LAB1'
+$optLab.RawInquiry.Vendor = 'LAB'
+$optLab.RawInquiry.Revision = 'LAB1'
+$optLabOkay = Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($optLab)
+Assert-C5 (Has-C5 $optLabOkay 'OPTICAL_LAB_SCOPE' 'PASS') 'opt-in synthetic LAB optical identity matches all three independent layers'
+Assert-C5 (Has-C5 $optLabOkay 'ATAPI_OPTICAL' 'PASS') 'opt-in LAB optical direct INQUIRY matches Windows descriptor and PnP'
+Assert-C5 (Has-C5 $optLabOkay 'OPTICAL_OS_DESCRIPTOR' 'PASS') 'LAB optical OS descriptor type and identity valid'
+$optLabBad = Copy-C5 $optLab
+$optLabBad.RawInquiry.Revision = 'BAD'
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($optLabBad)) 'OPTICAL_LAB_SCOPE' 'FAIL') 'LAB optical firmware/revision drift must FAIL'
+$optLabBad = Copy-C5 $optLab
+$optLabBad.PnpVendorProduct = 'VEN_LAB&PROD_OTHER'
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($optLabBad)) 'OPTICAL_LAB_SCOPE' 'FAIL') 'LAB optical wrong PnP product rejected'
+$optLabMissing = Copy-C5 $optLab
+$optLabMissing.RawInquiry = $null
+Assert-C5 (Has-C5 (Test-CloakStorageC5 -Disks @($disk) -OpticalDevices @($optLabMissing)) 'OPTICAL_LAB_SCOPE' 'NOT_VERIFIED') 'LAB optical cannot PASS without direct INQUIRY'
+Write-Host 'PASS: opt-in LAB optical PnP/OS/INQUIRY parity and mismatch/absence negative cases'
 Write-Host 'PASS: optical OS descriptor, direct INQUIRY, mismatch and fallback'
 
 $many = Test-CloakStorageC5 -Disks @($disk,$scsi)

@@ -24,7 +24,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$expectedS3Release = 'S3-C5-2026-11-B3'
+$expectedS3Release = 'S3-C5-2026-11-B4'
 $bundleManifestPath = Join-Path $PSScriptRoot 'CloakStorageS3Manifest.json'
 $bundleVerified = $false
 $sourceFiles = @(

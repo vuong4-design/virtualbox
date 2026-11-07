@@ -58,13 +58,13 @@ function ConvertFrom-CloakStorageDescriptor {
 }
 
 function Initialize-CloakStorageWin32 {
-    if ('CloakStorageS3ReadOnlyB3.DeviceProps' -as [type]) { return }
+    if ('CloakStorageS3ReadOnlyB4.DeviceProps' -as [type]) { return }
     $source = @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace CloakStorageS3ReadOnlyB3 {
+namespace CloakStorageS3ReadOnlyB4 {
     public static class DeviceProps {
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
         static extern SafeFileHandle CreateFile(
@@ -305,7 +305,7 @@ function Get-CloakStorageAtaIdentify {
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { return $null }
     try {
         Initialize-CloakStorageWin32
-        $bytes = [CloakStorageS3ReadOnlyB3.DeviceProps]::AtaIdentify(('\\.\PhysicalDrive'+$DiskIndex))
+        $bytes = [CloakStorageS3ReadOnlyB4.DeviceProps]::AtaIdentify(('\\.\PhysicalDrive'+$DiskIndex))
         return ConvertFrom-CloakAtaIdentify -Bytes $bytes
     } catch {
         return $null  # Drivers may reject ATA pass-through; never print paths.
@@ -338,7 +338,7 @@ function Get-CloakStorageOpticalInquiry {
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) { return $null }
     try {
         Initialize-CloakStorageWin32
-        $bytes = [CloakStorageS3ReadOnlyB3.DeviceProps]::Inquiry(('\\.\' + $OpticalDrive))
+        $bytes = [CloakStorageS3ReadOnlyB4.DeviceProps]::Inquiry(('\\.\' + $OpticalDrive))
         return ConvertFrom-CloakScsiInquiry -Bytes $bytes
     } catch {
         return $null  # No device paths/driver errors disclosed.
@@ -408,7 +408,7 @@ function Get-CloakStorageScsiVpd83 {
     } else { '\\.' + '\' + $OpticalDrive }
     try {
         Initialize-CloakStorageWin32
-        $bytes = [CloakStorageS3ReadOnlyB3.DeviceProps]::InquiryVpd83($path)
+        $bytes = [CloakStorageS3ReadOnlyB4.DeviceProps]::InquiryVpd83($path)
         return ConvertFrom-CloakScsiVpd83 -Bytes $bytes
     } catch {
         return $null
@@ -446,9 +446,9 @@ function Get-CloakStorageWindowsProperties {
     } else { '\\.\' + $OpticalDrive }
     try {
         Initialize-CloakStorageWin32
-        $descriptor = [CloakStorageS3ReadOnlyB3.DeviceProps]::QueryDetailed($path,0)
-        $trim = [CloakStorageS3ReadOnlyB3.DeviceProps]::QueryDetailed($path,8)
-        $seek = [CloakStorageS3ReadOnlyB3.DeviceProps]::QueryDetailed($path,7)
+        $descriptor = [CloakStorageS3ReadOnlyB4.DeviceProps]::QueryDetailed($path,0)
+        $trim = [CloakStorageS3ReadOnlyB4.DeviceProps]::QueryDetailed($path,8)
+        $seek = [CloakStorageS3ReadOnlyB4.DeviceProps]::QueryDetailed($path,7)
         $parsed = ConvertFrom-CloakStorageDescriptor -Device $descriptor.Data -Trim $trim.Data -Seek $seek.Data
         $parsed | Add-Member -NotePropertyName QueryStatus -NotePropertyValue ([pscustomobject][ordered]@{
             DeviceDescriptor = Get-C5QueryStatus $descriptor
@@ -467,6 +467,6 @@ function Get-CloakStorageWindowsProperties {
     }
 }
 function Get-CloakStorageWindowsQueryContract {
-    return [pscustomobject]@{ Release='S3-C5-2026-11-B3'; SchemaVersion=1; IoctlPolicy='FixedReadOnlyQueries' }
+    return [pscustomobject]@{ Release='S3-C5-2026-11-B4'; SchemaVersion=1; IoctlPolicy='FixedReadOnlyQueries' }
 }
 Export-ModuleMember -Function ConvertFrom-CloakStorageDescriptor,Get-CloakStorageWindowsProperties,ConvertFrom-CloakScsiInquiry,Get-CloakStorageOpticalInquiry,ConvertFrom-CloakAtaIdentify,Get-CloakStorageAtaIdentify,ConvertFrom-CloakScsiVpd83,Get-CloakStorageScsiVpd83,Get-CloakStorageWindowsQueryContract

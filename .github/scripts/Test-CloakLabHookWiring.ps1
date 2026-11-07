@@ -77,13 +77,35 @@ Add-CloakRow 'STORAGE_ELIGIBLE_COVERAGE_GUARD' 'WIRED_LAB' $storagePath 'Enabled
 
 Require-CloakPattern $console 'if (enmType == DeviceType_DVD)' 'Optical inventory hook'
 Require-CloakPattern $console 'cOptical++' 'Explicit optical residual count'
-Add-CloakRow 'OPTICAL_ATTACHMENT_INVENTORY' 'OBSERVED_ONLY' $consolePath 'Optical counted, never rebranded by ATA HDD lab profile'
+Add-CloakRow 'OPTICAL_ATTACHMENT_INVENTORY' 'OBSERVED_ONLY' $consolePath 'Optical is counted without changing default descriptors; opt-in uses separate optical profile'
 
 $ata=Load-CloakSource 'src/VBox/Devices/Storage/DevATA.cpp'
 $ahci=Load-CloakSource 'src/VBox/Devices/Storage/DevAHCI.cpp'
 Require-CloakPattern $ata '"ATAPIVendorId"' 'PIIX3 optical CFGM backend sink'
 Require-CloakPattern $ahci '"ATAPIProductId"' 'AHCI optical CFGM backend sink'
-Add-CloakRow 'ATAPI_PROFILE_MATERIALIZER' 'BACKEND_PRESENT_NOT_WIRED' 'src/VBox/Devices/Storage/DevATA.cpp;DevAHCI.cpp' 'Existing ATAPI sinks; no per-optical lab identity profile'
+Require-CloakPattern $ata '"ATAPIRevision"' 'PIIX3 optical revision backend'
+Require-CloakPattern $ata '"OverwriteInquiry"' 'IDE direct INQUIRY overwrite backend'
+Require-CloakPattern $ahci '"ATAPIVendorId"' 'AHCI optical vendor backend'
+Require-CloakPattern $ahci '"ATAPIRevision"' 'AHCI optical revision backend'
+Require-CloakPattern $console 'StorageLabOpticalEnabled' 'Independent opt-in must exist'
+Require-CloakPattern $console 'if (!fLabOpticalEnabled)' 'Default optical identity must not change'
+Require-CloakPattern $console 'if (fHostDrive || fPassThrough)' 'Host optical/passthrough guard'
+Require-CloakPattern $console 'CloakStorageLabOpticalSerial(' 'Synthetic stable optical serial per attachment'
+Require-CloakPattern $storage 'CloakStorageMaterializeOptical(' 'Optical CFGM materializer'
+Require-CloakPattern $storage 'CloakStorageValidateLabOpticalEffective(' 'Optical effective identity validator'
+Require-CloakPattern $storage 'CloakStorageValidateLabOpticalCoverage(' 'Optical coverage guard'
+Require-CloakPattern $console 'CloakStorageValidateLabOpticalCoverage(fLabOpticalEnabled, cOptical,' 'Optical gate in config path'
+Require-CloakPattern $tests 'testStorageLabOpticalMaterialization(hTest);' 'C++ native optical test registered'
+$optMaterialize = $console.IndexOf('vrc = CloakStorageMaterializeOptical(&Cfgm, pOpticalSlot, &Optical, fIde)')
+$optValidate = $console.IndexOf('vrc = CloakStorageValidateLabOpticalEffective(&Cfgm, pOpticalSlot,')
+$optWipe = $console.IndexOf('RTMemWipeThoroughly(szOpticalSerial, sizeof(szOpticalSerial), 3)', $optMaterialize)
+if ($optMaterialize -lt 0 -or $optValidate -le $optMaterialize -or $optWipe -le $optValidate) {
+    throw 'Optical identity must be validated after materialization and before serial wipe'
+}
+$hostScriptContent = Load-CloakSource '.github/scripts/Set-CloakLabStorage.ps1'
+Require-CloakPattern $hostScriptContent "'EnableOptical','DisableOptical'" 'Poweroff host optical switch'
+Require-CloakPattern $hostScriptContent 'VBoxInternal/Cloak/StorageLabOpticalEnabled' 'Optical host ExtraData switch'
+Add-CloakRow 'ATAPI_PROFILE_MATERIALIZER' 'WIRED_LAB_OPTIN' $storagePath 'Synthetic virtual IDE/AHCI optical identity, separate disabled-by-default switch, no host passthrough'
 
 foreach ($relative in @(
     'src/VBox/Devices/Storage/VSCSI/VSCSILunSbc.cpp',

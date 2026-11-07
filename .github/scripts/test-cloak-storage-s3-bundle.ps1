@@ -12,7 +12,7 @@ try {
     & (Join-Path $PSScriptRoot 'New-CloakStorageS3Bundle.ps1') -OutputPath $archive
     Expand-Archive -LiteralPath $archive -DestinationPath $extracted -ErrorAction Stop
     $manifest = Get-Content -LiteralPath (Join-Path $extracted 'CloakStorageS3Manifest.json') -Raw | ConvertFrom-Json
-    if ($manifest.Release -ne 'S3-C5-2026-11-B3' -or @($manifest.Files).Count -ne 3) {
+    if ($manifest.Release -ne 'S3-C5-2026-11-B4' -or @($manifest.Files).Count -ne 3) {
         throw 'Bad bundle version/contents'
     }
     foreach ($file in $manifest.Files) {
@@ -40,7 +40,7 @@ try {
     $report = Join-Path $root 'report.json'
     & $script -SkipSmartctl -SkipWindowsIoctl -OutputPath $report
     $json = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-    if ($json.Overall -ne 'PARTIAL' -or $json.AuditRevision -ne 'S3-C5-2026-11-B3' -or
+    if ($json.Overall -ne 'PARTIAL' -or $json.AuditRevision -ne 'S3-C5-2026-11-B4' -or
         $json.BundleIntegrity -ne 'SHA256_VERIFIED') {
         throw 'Bundle did not attest revision and integrity'
     }
@@ -74,7 +74,7 @@ try {
     Write-Host 'PASS: tampered guest module rejected before import'
 
     [IO.File]::Delete((Join-Path $extracted 'CloakStorageS3Manifest.json'))
-    $oldText = [IO.File]::ReadAllText($module).Replace('S3-C5-2026-11-B3','S3-C5-OLD')
+    $oldText = [IO.File]::ReadAllText($module).Replace('S3-C5-2026-11-B4','S3-C5-OLD')
     [IO.File]::WriteAllText($module,$oldText,[Text.Encoding]::UTF8)
     $mismatch = $false
     try { & $script -SkipSmartctl -SkipWindowsIoctl } catch {

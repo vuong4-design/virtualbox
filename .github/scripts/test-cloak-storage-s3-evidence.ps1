@@ -6,7 +6,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'CloakStorageC5.psm1') -Force
-if ((Get-CloakStorageC5Contract).Release -ne 'S3-C5-2026-11-B3') {
+if ((Get-CloakStorageC5Contract).Release -ne 'S3-C5-2026-11-B4') {
     throw 'Incorrect S3 C5 module release for evidence regression'
 }
 $disks = @(
