@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $guest = Join-Path $PSScriptRoot 'Test-CloakStorageS3Guest.ps1'
 $global:C5FixtureSingle = $false
+$global:C5FixtureOptical = $false
 
 function global:Get-CimInstance {
     [CmdletBinding()]
@@ -21,7 +22,12 @@ function global:Get-CimInstance {
         if ($global:C5FixtureSingle) { return $entries[0] }
         return $entries
     }
-    if ($ClassName -eq 'Win32_CDROMDrive') { return @() }
+    if ($ClassName -eq 'Win32_CDROMDrive') {
+        if ($global:C5FixtureOptical) {
+            return [pscustomobject]@{Drive='Z:';Name='VBOX CD-ROM';PNPDeviceID='SCSI\CDROM&VEN_VBOX&PROD_CD-ROM\4&PRIVATEOPT'}
+        }
+        return @()
+    }
     throw "Unexpected WMI class: $ClassName"
 }
 function global:Get-Disk {
@@ -42,7 +48,7 @@ $out = [IO.Path]::GetTempFileName()
 $mockSmartctl = $out + '.ps1'
 $hostReport = $out + '.host.json'
 try {
-    & $guest -SkipSmartctl -OutputPath $out
+    & $guest -SkipSmartctl -SkipWindowsIoctl -OutputPath $out
     $text = [IO.File]::ReadAllText($out)
     if ($text.Contains('LB-SECRET-ONE') -or $text.Contains('LB-SECRET-TWO') -or
         $text.Contains('4&PRIVATE')) { throw 'Unredacted disk identifiers in S3 report' }
@@ -54,11 +60,23 @@ try {
         throw 'Missing smartctl must not yield PASS'
     }
     $caught = $false
-    try { & $guest -SkipSmartctl -RequireRaw } catch {
+    try { & $guest -SkipSmartctl -SkipWindowsIoctl -RequireRaw } catch {
         if ($_.Exception.Message -match 'strict audit incomplete') { $caught = $true } else { throw }
     }
     if (-not $caught) { throw 'S3 -RequireRaw did not fail on missing smartctl' }
     Write-Host 'PASS: S3 guest collector 2-disk, no-raw PARTIAL, redaction and RequireRaw failure'
+    $global:C5FixtureOptical = $true
+    & $guest -SkipSmartctl -SkipWindowsIoctl -OutputPath $out
+    $withOptical = [IO.File]::ReadAllText($out)
+    if ($withOptical.Contains('PRIVATEOPT')) { throw 'Full optical PnP instance leaked' }
+    $opticalReport = $withOptical | ConvertFrom-Json
+    if (@($opticalReport.OpticalDevices).Count -ne 1 -or
+        @($opticalReport.Checks | Where-Object { $_.Id -eq 'ATAPI_OPTICAL' -and $_.Status -eq 'NOT_VERIFIED' }).Count -ne 1) {
+        throw 'Optical device must be inventoried and unverified without direct INQUIRY'
+    }
+    $global:C5FixtureOptical = $false
+    Write-Host 'PASS: guest optical inventory and missing direct INQUIRY remain NOT_VERIFIED'
+
     # Mock smartctl JSON to exercise the actual S3 collector's parser and
     # reporter. The fixture contains fake identifiers only.
     $global:C5FixtureSingle = $true
@@ -80,7 +98,7 @@ try {
             NonRotational=$true;Discard=$false})
     }
     [IO.File]::WriteAllText($hostReport,($hostFixture | ConvertTo-Json -Depth 5),[Text.Encoding]::UTF8)
-    & $guest -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw -OutputPath $out
+    & $guest -SkipWindowsIoctl -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw -OutputPath $out
     $rawJson = [IO.File]::ReadAllText($out)
     if ($rawJson.Contains('LB-SECRET-ONE') -or $rawJson.Contains('4&PRIVATE')) {
         throw 'smartctl raw serial/PnP suffix leaked to S3 JSON'
@@ -98,7 +116,7 @@ try {
     $hostFixture.Bindings[0].Discard = $true
     [IO.File]::WriteAllText($hostReport,($hostFixture | ConvertTo-Json -Depth 5),[Text.Encoding]::UTF8)
     $hostMismatch = $false
-    try { & $guest -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw } catch {
+    try { & $guest -SkipWindowsIoctl -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw } catch {
         $hostMismatch = $_.Exception.Message -match 'C5 contradictions detected'
     }
     if (-not $hostMismatch) { throw 'Host discard mismatch was not rejected' }
@@ -109,7 +127,7 @@ try {
         ($mockBody -replace "model_name = 'LAB ATA DISK'","model_name = 'WRONG MODEL'"),
         [Text.Encoding]::UTF8)
     $contradictionDetected = $false
-    try { & $guest -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw -OutputPath $out } catch {
+    try { & $guest -SkipWindowsIoctl -SmartctlPath $mockSmartctl -HostCapabilitiesPath $hostReport -RequireRaw -OutputPath $out } catch {
         if ($_.Exception.Message -match 'C5 contradictions detected') {
             $contradictionDetected = $true
         } else { throw }
@@ -123,4 +141,5 @@ finally {
     [IO.File]::Delete($out)
     [IO.File]::Delete($mockSmartctl)
     [IO.File]::Delete($hostReport)
+    $global:C5FixtureOptical = $false
 }

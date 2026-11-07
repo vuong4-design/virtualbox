@@ -250,8 +250,9 @@ firmware, serial hash, SMART support/enabled, TRIM support and rotation. For
 **direct SCSI** results only, it also compares INQUIRY vendor/product/revision
 against the reported Windows identity. The SCSI PnP prefix
 `SCSI\\DISK` on an ATA/SATA disk is **not** direct SCSI INQUIRY evidence.
-Raw VPD page 0x83 and ATAPI optical INQUIRY remain NOT_VERIFIED unless another
-collector is later integrated.
+Raw SCSI VPD page 0x83 remains NOT_VERIFIED. ATAPI optical INQUIRY is
+attempted by the opt-in read-only Windows pass-through described in S3.1;
+if the guest driver blocks the query, it also remains NOT_VERIFIED.
 
 On the host, inspect the controller name, port and device before mapping:
 
@@ -275,7 +276,7 @@ from port order. The host policy JSON contains only controller, port/device,
 explicitly mapped guest index, `NonRotational` and `Discard` booleans. It
 **does not** contain VDI location, image UUID, serial or seed.
 
-Copy **both** `Test-CloakStorageS3Guest.ps1` and `CloakStorageC5.psm1`
+Copy **all three** `Test-CloakStorageS3Guest.ps1`, `CloakStorageC5.psm1` and `CloakStorageWindowsQuery.psm1`
 from `.github/scripts` next to each other inside the Windows guest; also
 copy the optional `cloak-c5-host.json` from the host. Execute:
 
@@ -311,6 +312,47 @@ Offline CI runs `test-cloak-storage-s3.ps1` (pure C5 contradictions),
 `test-cloak-storage-s3-collector.ps1` (guest collector, synthetic smartctl
 JSON, host pairing, fail cases and report redaction). **CI fixture PASS is
 not actual guest hardware C5 PASS.**
+
+#### S3.1 Native Windows storage query and optical INQUIRY (2026-11-04)
+
+S3 now includes `CloakStorageWindowsQuery.psm1`. Copy this module beside
+`Test-CloakStorageS3Guest.ps1` and `CloakStorageC5.psm1` in Windows guest.
+
+- Default: read-only `IOCTL_STORAGE_QUERY_PROPERTY` for device descriptor,
+  `StorageDeviceTrimProperty` and `StorageDeviceSeekPenaltyProperty`.
+  These observations are OS-mediated, **not** raw ATA IDENTIFY.
+- Optional `-NativeAtaIdentify`: fixed, read-only `ATA IDENTIFY DEVICE 0xEC`
+  via `IOCTL_ATA_PASS_THROUGH`; parses model, firmware, hashed serial,
+  SMART bits 82/85, TRIM word 169 and rotation word 217. Driver denial
+  returns NOT_VERIFIED (or falls back to smartctl if installed).
+- Optical: Windows descriptor plus fixed, read-only SCSI `INQUIRY 0x12`
+  via `IOCTL_SCSI_PASS_THROUGH` when the optical drive has a letter.
+  C5 compares vendor/product/revision with descriptor/PnP. Device drivers
+  may reject this read. Optical is not mapped to Win32_DiskDrive index.
+- New checks: `OS_DEVICE_DESC`, `OS_TRIM`, `OS_SEEK`, `OS_RAW_TRIM`,
+  `OS_RAW_ROTATION`, `OPTICAL_OS_DESCRIPTOR` and `ATAPI_OPTICAL`.
+
+Inside Windows guest, Administrator PowerShell:
+
+```powershell
+.\Test-CloakStorageS3Guest.ps1 `
+    -NativeAtaIdentify `
+    -HostCapabilitiesPath ".\cloak-c5-host.json" `
+    -OutputPath "$env:TEMP\cloak-storage-s3-native.json"
+```
+
+Use `-SkipWindowsIoctl` to disable Windows device queries, or
+`-SkipOpticalInquiry` to skip direct optical SCSI INQUIRY. Only fixed
+DATA_IN commands are available; no SMART enable, no TRIM write, no driver
+change. No raw ATA 512-byte block, serial, full PnP instance or optical
+device path is written to the sanitized report. `-RequireRaw` fails with
+`INCOMPLETE` if required raw evidence remains missing (such as VPD 0x83).
+Windows TrimEnabled is never treated as proof that ATA TRIM executes.
+
+CI runs `test-cloak-storage-s3-winquery.ps1` and
+`test-cloak-storage-s3-ata.ps1` with synthetic bytes and no real devices.
+Native query success and optical pass-through require separate VM runtime
+evidence; do not label S3 fully PASS from the offline fixtures.
 
 ## Roll back safely
 

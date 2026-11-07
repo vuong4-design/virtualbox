@@ -7,7 +7,7 @@
   Missing SMART/TRIM/rotation/INQUIRY/VPD evidence is NOT_VERIFIED.
   Never writes guest hardware settings, sends TRIM, enables SMART, or changes
   VirtualBox drivers. Report excludes raw serials, medium UUIDs, full PnP IDs.
-  Copy CloakStorageC5.psm1 beside this script.
+  Copy CloakStorageC5.psm1 and CloakStorageWindowsQuery.psm1 beside this script.
 #>
 [CmdletBinding()]
 param(
@@ -15,11 +15,15 @@ param(
     [switch]$SkipSmartctl,
     [switch]$RequireRaw,
     [string]$SmartctlPath = '',
-    [string]$HostCapabilitiesPath = ''
+    [string]$HostCapabilitiesPath = '',
+    [switch]$SkipWindowsIoctl,
+    [switch]$SkipOpticalInquiry,
+    [switch]$NativeAtaIdentify
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'CloakStorageC5.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'CloakStorageWindowsQuery.psm1') -Force
 
 function Get-S3Hash([string]$Value) {
     if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
@@ -115,7 +119,11 @@ if (-not $SkipSmartctl) {
     }
 }
 if (-not $smartTool) {
-    Write-Host 'S3: smartctl unavailable or skipped; raw ATA/SCSI identity and capabilities NOT_VERIFIED'
+    if ($NativeAtaIdentify) {
+        Write-Host 'S3: smartctl unavailable or skipped; trying read-only native ATA IDENTIFY (0xEC)'
+    } else {
+        Write-Host 'S3: smartctl unavailable or skipped; raw ATA/SCSI identity and capabilities NOT_VERIFIED'
+    }
 }
 
 $normalizedDisks = @()
@@ -128,7 +136,9 @@ foreach ($disk in $wmiDisks) {
     $mediaType = if ($wmiDisks.Count -eq 1 -and $physicalDisks.Count -eq 1) {
         [string]$physicalDisks[0].MediaType
     } else { 'Unspecified' }
-    $raw = if ($smartTool) { Get-S3RawInfo $smartTool $index } else { $null }
+    $raw = if ($NativeAtaIdentify) { Get-CloakStorageAtaIdentify -DiskIndex $index } else { $null }
+    if (-not $raw -and $smartTool) { $raw = Get-S3RawInfo $smartTool $index }
+    $windowsProps = if (-not $SkipWindowsIoctl) { Get-CloakStorageWindowsProperties -DiskIndex $index } else { $null }
     $row = [pscustomobject][ordered]@{
         Index = $index
         Model = ([string]$disk.Model).Trim()
@@ -139,6 +149,8 @@ foreach ($disk in $wmiDisks) {
         WindowsMediaType = $mediaType
         WindowsDiskHealth = if ($systemDisk.Count -eq 1) { [string](Get-S3Field $systemDisk[0] 'HealthStatus') } else { '' }
         PartitionStyle = if ($systemDisk.Count -eq 1) { [string](Get-S3Field $systemDisk[0] 'PartitionStyle') } else { '' }
+        WindowsQueryAttempted = (-not $SkipWindowsIoctl)
+        WindowsQuery = $windowsProps
         Raw = $raw
     }
     $normalizedDisks += $row
@@ -146,7 +158,31 @@ foreach ($disk in $wmiDisks) {
         $index, $row.Model, $row.Firmware, $bus, $mediaType, $row.WindowsDiskHealth, $row.PnpVendorProduct,
         $(if ($raw) { $raw.Protocol } else { 'UNAVAILABLE' }))
 }
-Write-Host ("S3 Optical devices: {0} (raw ATAPI INQUIRY not collected)" -f $optical.Count)
+$normalizedOptical = @()
+for ($i=0; $i -lt $optical.Count; $i++) {
+    $cd = $optical[$i]
+    $drive = ([string](Get-S3Field $cd 'Drive')).Trim()
+    $hasDrive = $drive -match '^[A-Za-z]:$'
+    $descriptor = $null
+    $inquiry = $null
+    if (-not $SkipWindowsIoctl -and $hasDrive) {
+        $descriptor = Get-CloakStorageWindowsProperties -OpticalDrive $drive
+        if (-not $SkipOpticalInquiry) {
+            $inquiry = Get-CloakStorageOpticalInquiry -OpticalDrive $drive
+        }
+    }
+    $normalizedOptical += [pscustomobject][ordered]@{
+        Index = $i
+        PnpVendorProduct = Get-S3PnpPair ([string](Get-S3Field $cd 'PNPDeviceID'))
+        WindowsQuery = $descriptor
+        RawInquiry = $inquiry
+    }
+    Write-Host ("S3 Optical {0}: PnP={1}; OS descriptor={2}; direct INQUIRY={3}" -f
+        $i,$normalizedOptical[-1].PnpVendorProduct,
+        $(if ($descriptor) { 'AVAILABLE' } else { 'UNAVAILABLE' }),
+        $(if ($inquiry) { 'AVAILABLE' } else { 'UNAVAILABLE' }))
+}
+Write-Host ("S3 Optical devices: {0}; raw INQUIRY requires a valid optical drive letter and pass-through support" -f $normalizedOptical.Count)
 
 if ($HostCapabilitiesPath) {
     if (-not (Test-Path -LiteralPath $HostCapabilitiesPath -PathType Leaf)) {
@@ -176,7 +212,7 @@ if ($HostCapabilitiesPath) {
     Write-Host ("S3 host C5: mapped {0} disk(s); unmatched attachments excluded, not guessed" -f $mapped.Count)
 }
 
-$report = Test-CloakStorageC5 -Disks $normalizedDisks -OpticalDevices $optical -RequireRaw:$RequireRaw
+$report = Test-CloakStorageC5 -Disks $normalizedDisks -OpticalDevices $normalizedOptical -RequireRaw:$RequireRaw
 foreach ($check in $report.Checks) {
     Write-Host ("C5 [{0}] Disk={1} {2}: {3}" -f $check.Status,$check.Disk,$check.Id,$check.Note)
 }
@@ -191,6 +227,7 @@ if ($OutputPath) {
         Audit = 'Storage-S3-C5'
         Overall = $report.Overall
         Disks = @($normalizedDisks)
+        OpticalDevices = @($normalizedOptical)
         Checks = @($report.Checks)
     }
     # Raw fields are already normalized and redacted, including serial SHA256.

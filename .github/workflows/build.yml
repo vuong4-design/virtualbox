@@ -313,6 +313,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           $ErrorActionPreference = 'Stop'
+          & '.github/scripts/test-cloak-storage-s3-winquery.ps1'
+          if (-not $?) { throw 'Storage S3 Windows storage descriptor tests failed' }
+          & '.github/scripts/test-cloak-storage-s3-ata.ps1'
+          if (-not $?) { throw 'Storage S3 native ATA IDENTIFY parser tests failed' }
           & '.github/scripts/test-cloak-storage-s3.ps1'
           if (-not $?) { throw 'Storage S3/C5 verifier tests failed' }
           & '.github/scripts/test-cloak-storage-s3-host.ps1'

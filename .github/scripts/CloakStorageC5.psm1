@@ -61,6 +61,37 @@ function Test-CloakStorageC5 {
                 $checks.Add((New-C5Check $index 'PROFILE_LAB' 'PASS' 'Lab model, firmware and PnP vendor/product agree'))
             }
         }
+        # Windows class-driver storage properties are independent read-only
+        # observations, NOT direct ATA IDENTIFY / SMART / SCSI INQUIRY.
+        $winQuery = Get-C5Field $disk 'WindowsQuery'
+        if ($null -eq $winQuery) {
+            $osStatus = if (Get-C5Field $disk 'WindowsQueryAttempted') { 'NOT_VERIFIED' } else { 'NOT_APPLICABLE' }
+            foreach ($id in @('OS_DEVICE_DESC','OS_TRIM','OS_SEEK')) {
+                $checks.Add((New-C5Check $index $id $osStatus 'Windows storage-property query unavailable or skipped'))
+            }
+        } else {
+            $devType = Get-C5Field $winQuery 'DeviceType'
+            if ($null -eq $devType) {
+                $checks.Add((New-C5Check $index 'OS_DEVICE_DESC' 'NOT_VERIFIED' 'Windows device descriptor unavailable'))
+            } elseif ([int]$devType -ne 0) {
+                $checks.Add((New-C5Check $index 'OS_DEVICE_DESC' 'FAIL' 'Windows disk descriptor is not direct-access device type'))
+            } else {
+                $checks.Add((New-C5Check $index 'OS_DEVICE_DESC' 'PASS' 'Windows descriptor reports direct-access device'))
+            }
+            $osTrim = Get-C5Field $winQuery 'TrimEnabled'
+            if ($null -eq $osTrim) {
+                $checks.Add((New-C5Check $index 'OS_TRIM' 'NOT_VERIFIED' 'Windows trim property unavailable'))
+            } else {
+                $checks.Add((New-C5Check $index 'OS_TRIM' 'PASS' ('Windows storage stack TrimEnabled=' + [bool]$osTrim + '; not raw ATA word 169')))
+            }
+            $osSeek = Get-C5Field $winQuery 'IncursSeekPenalty'
+            if ($null -eq $osSeek) {
+                $checks.Add((New-C5Check $index 'OS_SEEK' 'NOT_VERIFIED' 'Windows seek-penalty property unavailable'))
+            } else {
+                $checks.Add((New-C5Check $index 'OS_SEEK' 'PASS' ('Windows storage stack IncursSeekPenalty=' + [bool]$osSeek + '; not raw ATA word 217')))
+            }
+        }
+
         if ($null -eq $raw) {
             foreach ($id in @('RAW_MODEL','RAW_FIRMWARE','RAW_SERIAL','SMART','TRIM','ROTATION','TRANSPORT')) {
                 $checks.Add((New-C5Check $index $id 'NOT_VERIFIED' 'Direct ATA/SCSI observation unavailable'))
@@ -122,6 +153,28 @@ function Test-CloakStorageC5 {
             } else {
                 $checks.Add((New-C5Check $index 'ROTATION' 'PASS' 'Raw rotation and Windows MediaType agree'))
             }
+        }
+
+        # Windows storage-class properties are OS-interpreted observations.
+        # Compare them to raw ATA evidence only when both are present.
+        $osTrimFlag = Get-C5Field $winQuery 'TrimEnabled'
+        if ($null -eq $osTrimFlag -or $null -eq $trim) {
+            $checks.Add((New-C5Check $index 'OS_RAW_TRIM' 'NOT_APPLICABLE' 'Windows trim or direct ATA support unavailable'))
+        } elseif ([bool]$osTrimFlag -and -not [bool]$trim) {
+            $checks.Add((New-C5Check $index 'OS_RAW_TRIM' 'FAIL' 'Windows reports TRIM enabled but raw ATA says unsupported'))
+        } else {
+            $checks.Add((New-C5Check $index 'OS_RAW_TRIM' 'PASS' 'Windows TRIM state is compatible with raw ATA support'))
+        }
+        $osSeekFlag = Get-C5Field $winQuery 'IncursSeekPenalty'
+        if ($null -eq $osSeekFlag -or $null -eq $rotation -or "$rotation" -notmatch '^\d+$') {
+            $checks.Add((New-C5Check $index 'OS_RAW_ROTATION' 'NOT_APPLICABLE' 'Windows seek or direct ATA rotation unavailable'))
+        } elseif (([int]$rotation -eq 1 -and [bool]$osSeekFlag) -or
+                  ([int]$rotation -ge 100 -and -not [bool]$osSeekFlag)) {
+            $checks.Add((New-C5Check $index 'OS_RAW_ROTATION' 'FAIL' 'Windows seek penalty conflicts with raw rotation'))
+        } elseif ([int]$rotation -eq 1 -or [int]$rotation -ge 100) {
+            $checks.Add((New-C5Check $index 'OS_RAW_ROTATION' 'PASS' 'Windows seek penalty and raw rotation agree'))
+        } else {
+            $checks.Add((New-C5Check $index 'OS_RAW_ROTATION' 'NOT_APPLICABLE' 'Unclassified rotation value'))
         }
 
         # Cross-check host-side attachment flags only when a verified
@@ -190,7 +243,47 @@ function Test-CloakStorageC5 {
         }
     }
     foreach ($optical in $OpticalDevices) {
-        $checks.Add((New-C5Check -1 'ATAPI_OPTICAL' 'NOT_VERIFIED' 'Optical device present; raw ATAPI INQUIRY not collected'))
+        $opticalIndex = Get-C5Field $optical 'Index'
+        if ($null -eq $opticalIndex) { $opticalIndex = 0 }
+        $slot = -1 - [int]$opticalIndex
+        $pnp = [string](Get-C5Field $optical 'PnpVendorProduct')
+        $pnVendor = Get-C5PnpPart $pnp 'VEN'
+        $pnProduct = Get-C5PnpPart $pnp 'PROD'
+        $desc = Get-C5Field $optical 'WindowsQuery'
+        $inq = Get-C5Field $optical 'RawInquiry'
+        $descVen = (Get-C5Text (Get-C5Field $desc 'Vendor')).ToUpperInvariant()
+        $descProd = (Get-C5Text (Get-C5Field $desc 'Product')).ToUpperInvariant()
+        $descRev = Get-C5Text (Get-C5Field $desc 'Revision')
+        $type = Get-C5Field $desc 'DeviceType'
+        if ($null -eq $desc -or $null -eq $type -or -not $descVen -or -not $descProd) {
+            $checks.Add((New-C5Check $slot 'OPTICAL_OS_DESCRIPTOR' 'NOT_VERIFIED' 'Windows optical storage descriptor missing'))
+        } elseif ([int]$type -ne 5) {
+            $checks.Add((New-C5Check $slot 'OPTICAL_OS_DESCRIPTOR' 'FAIL' 'Optical descriptor is not SCSI peripheral type 5'))
+        } elseif ($pnVendor -and $pnProduct -and ($descVen -ne $pnVendor -or $descProd -ne $pnProduct)) {
+            $checks.Add((New-C5Check $slot 'OPTICAL_OS_DESCRIPTOR' 'FAIL' 'Optical descriptor conflicts with PnP vendor/product'))
+        } else {
+            $checks.Add((New-C5Check $slot 'OPTICAL_OS_DESCRIPTOR' 'PASS' 'Windows optical descriptor valid; OS-mediated, not direct INQUIRY'))
+        }
+
+        $inqVen = (Get-C5Text (Get-C5Field $inq 'Vendor')).ToUpperInvariant()
+        $inqProd = (Get-C5Text (Get-C5Field $inq 'Product')).ToUpperInvariant()
+        $inqRev = Get-C5Text (Get-C5Field $inq 'Revision')
+        $inqType = Get-C5Field $inq 'DeviceType'
+        if ($null -eq $inq -or $null -eq $inqType -or -not $inqVen -or -not $inqProd) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'NOT_VERIFIED' 'Direct read-only SCSI INQUIRY unavailable'))
+        } elseif ([int]$inqType -ne 5) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'FAIL' 'Direct SCSI INQUIRY peripheral type is not CD/DVD'))
+        } elseif ($descVen -and $descProd -and ($inqVen -ne $descVen -or $inqProd -ne $descProd)) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'FAIL' 'Direct optical INQUIRY disagrees with Windows storage descriptor'))
+        } elseif ($pnVendor -and $pnProduct -and ($inqVen -ne $pnVendor -or $inqProd -ne $pnProduct)) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'FAIL' 'Direct optical INQUIRY disagrees with PnP'))
+        } elseif ($descRev -and $inqRev -and $inqRev -ine $descRev) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'FAIL' 'Direct optical INQUIRY revision disagrees with descriptor'))
+        } elseif (($pnVendor -and $pnProduct) -or ($descVen -and $descProd)) {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'PASS' 'Direct read-only SCSI INQUIRY agrees with available Windows identity'))
+        } else {
+            $checks.Add((New-C5Check $slot 'ATAPI_OPTICAL' 'NOT_VERIFIED' 'Raw INQUIRY read but no independent vendor/product to compare'))
+        }
     }
     $failed = @($checks | Where-Object Status -eq 'FAIL').Count
     $missing = @($checks | Where-Object Status -eq 'NOT_VERIFIED').Count
